@@ -40,8 +40,32 @@ CAR_HEIGHT      equ 40
 PLAYER_X        equ 151     
 PLAYER_Y        equ 160    
 
+; Animation and timing constants
+SCROLL_SPEED           equ 5      ; Pixels per frame for scrolling
+LANE_PATTERN_SIZE      equ 20     ; Lane divider pattern repeats every 20px
+BORDER_PATTERN_SIZE    equ 20     ; Border pattern repeats every 20px
+OBSTACLE_SPAWN_TIME    equ 50     ; Frames between obstacle spawns
+COIN_SPAWN_TIME        equ 28     ; Frames between coin spawns
+DELAY_OUTER_LOOP       equ 2      ; Outer delay loop count
+DELAY_INNER_LOOP       equ 0xE000 ; Inner delay loop count
+
+; Object dimensions for collision detection
+COIN_SIZE              equ 10     ; Coin is 10x10 pixels
+COIN_HALF_SIZE         equ 5      ; Half size for center calculations
+COIN_CLEAR_SIZE        equ 16     ; Size to clear around coin
+
+; Spawn positions
+SPAWN_Y_POSITION       equ 25     ; Y position where objects spawn
+SPAWN_CHECK_THRESHOLD  equ 100    ; Y threshold for spawn checking
+LANE_CHECK_DISTANCE    equ 30     ; Distance to check for obstacles in lane
+COIN_LANE_DISTANCE     equ 20     ; Distance to check for coins in lane
+
+; Collision adjustments
+OBSTACLE_CLEAR_BUFFER  equ 15     ; Buffer when clearing obstacles off-screen
+
 ; Animation variables
 spawn_timer     dw 0          ; Timer for spawning obstacles
+coin_timer      dw 0          ; Timer for spawning coins
 
 ; Obstacle cars (up to 3 active)
 obstacle_count  db 0
@@ -56,16 +80,33 @@ coin_x          times 5 dw 0  ; X positions
 coin_y          times 5 dw 0  ; Y positions
 coin_old_y      times 5 dw 0  ; Previous Y positions for clearing
 coin_active     times 5 db 0  ; Active flags
-coin_timer      dw 0          ; Timer for spawning coins
 
 ; Road management
 lane_offset       dw 0
 border_offset     dw 0
 
+; Player car management
+player_lane     db 1          ; Current lane (0=left, 1=center, 2=right)
+player_x        dw PLAYER_X   ; Current X position
+player_y        dw PLAYER_Y   ; Current Y position
+
+; Game state
+game_started    db 0          ; 0 = not started, 1 = started
+
 ; Title strings
 title_text:     db 'Score:    FAISAL TOWN TRAFFIC  Fuel:  ', 0
+start_message:  db 'PRESS ANY KEY TO START', 0
 fuel:           dw 3
 score:          dw 0
+
+; Game state management
+game_paused     db 0             ; 0 = running, 1 = paused
+confirm_active  db 0             ; 0 = no confirmation, 1 = showing confirmation
+saved_road_area times 4800 db 0  ; Buffer to save screen area (80x60 pixels)
+
+; Confirmation box strings
+confirm_msg1:   db 'Do you want to quit?', 0
+confirm_msg2:   db 'Press Y or N', 0
 
 
 
@@ -80,6 +121,11 @@ start:
     ; Set ES to video memory segment
     mov ax, 0xA000
     mov es, ax
+
+    ; Initialize player position 
+    mov byte [player_lane], 1
+    mov word [player_x], PLAYER_X
+    mov word [player_y], PLAYER_Y
 
     ; Draw initial STATIC frame 
     call draw_background     ; 1. Green grass
@@ -96,64 +142,613 @@ start:
     mov word [spawn_timer], 0
     mov word [coin_timer], 0
 
+    ; Wait for key press to start animation
+    call wait_for_start_key
 
 
 
-; ==================== MAIN ANIMATION LOOP ====================
+
+; ==================== MAIN GAME LOOP ====================
 
 animation_loop:
-    ; Check for ESC key to exit
-    mov ah, 0x01
-    int 0x16
-    jz .no_key_pressed
+    call check_keyboard
     
-    mov ah, 0x00
-    int 0x16
-    cmp al, 27               ; ESC key?
-    je exit_program
+    ; Check if game is paused
+    cmp byte [game_paused], 1
+    je .skip_updates
     
-.no_key_pressed:
-    
-    call clear_old_obstacles
-    call clear_old_coins
-   
-    call update_obstacles
-    call update_coins
-
-    add word [lane_offset], 3
-    cmp word [lane_offset], 20
-    jl .no_lane_reset
-    sub word [lane_offset], 20
-.no_lane_reset:
-
-    ; Same offset for borders to keep them in sync
-    mov ax, [lane_offset]
-    mov [border_offset], ax
-
-    call draw_lane_dividers
-    call draw_road_borders
-    call draw_obstacles
-    call draw_coins
-    
-    call draw_player_car
-
+    ; Normal game updates (only when not paused)
+    call clear_old_objects
+    call update_all_objects
+    call update_lane_scroll
+    call draw_all_objects
     call check_collisions
     call update_title_numbers
+    call spawn_objects
+    call update_game_timers
     
-    call check_spawn_obstacle
-    call check_spawn_coin
-    
-    inc word [spawn_timer]
-    inc word [coin_timer]
-    
-    call animation_delay    
+.skip_updates:
+    call animation_delay
     jmp animation_loop
+
 
 exit_program:
     mov ax, 0x0003
     int 0x10
     mov ax, 0x4C00
     int 0x21
+
+
+
+; ==================== CONTROLLER FUNCTIONS ====================
+
+; ----- WAIT FOR ANY KEY PRESS TO START GAME -----
+wait_for_start_key:
+    push ax
+    
+    ; Wait for keypress
+    mov ah, 0x00
+    int 0x16
+    
+    ; Mark game as started
+    mov byte [game_started], 1
+    
+    ; Redraw title bar (now shows score/fuel)
+    call draw_title_bar
+    
+    pop ax
+    ret
+
+
+; ----- CHECK KEYBOARD INPUT (ESC, ARROW KEYS, Y, N) -----
+check_keyboard:
+    push ax
+    push bx
+    push cx
+    
+    mov ah, 0x01              ; Check if key available
+    int 0x16
+    jnz .key_pressed         
+    jmp .no_key              
+
+.key_pressed:
+    mov ah, 0x00              ; Read key
+    int 0x16
+    
+    ; Check if confirmation screen is active
+    cmp byte [confirm_active], 1
+    je .handle_confirmation
+    
+    ; Normal game controls
+    cmp al, 27                ; ESC key?
+    je .pause_game
+    
+    ; Check if game is paused (but no confirmation)
+    cmp byte [game_paused], 1
+    je .no_key                ; Ignore other keys if paused
+    
+    ; Check for extended keys (arrow keys) - only if not paused
+    cmp ah, 0x48              ; Up arrow
+    je .move_up
+    cmp ah, 0x50              ; Down arrow
+    je .move_down
+    cmp ah, 0x4B              ; Left arrow
+    je .move_left
+    cmp ah, 0x4D              ; Right arrow
+    je .move_right
+    jmp .no_key
+
+.handle_confirmation:
+    ; Only Y or N are valid during confirmation
+    cmp al, 'y'
+    je .quit_yes
+    cmp al, 'Y'
+    je .quit_yes
+    cmp al, 'n'
+    je .quit_no
+    cmp al, 'N'
+    je .quit_no
+    jmp .no_key
+    
+.pause_game:
+    ; Check if already paused with confirmation
+    cmp byte [confirm_active], 1
+    je .resume_game
+    
+    ; Pause the game and show confirmation
+    mov byte [game_paused], 1
+    mov byte [confirm_active], 1
+    call show_confirmation_screen
+    jmp .no_key
+    
+.resume_game:
+    ; Resume from pause (ESC pressed while in confirmation)
+    mov byte [game_paused], 0
+    mov byte [confirm_active], 0
+    call restore_game_screen
+    jmp .no_key
+    
+.quit_yes:
+    ; User confirmed quit
+    call restore_game_screen
+    jmp exit_program
+    
+.quit_no:
+    ; User canceled quit - resume game
+    mov byte [game_paused], 0
+    mov byte [confirm_active], 0
+    call restore_game_screen
+    jmp .no_key
+    
+.move_left:
+    call move_player_left
+    jmp .no_key
+    
+.move_right:
+    call move_player_right
+    jmp .no_key
+    
+.move_up:
+    call move_player_up
+    jmp .no_key
+    
+.move_down:
+    call move_player_down
+    jmp .no_key
+    
+.no_key:
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+
+; ----- CLEAR ALL OLD OBJECT POSITIONS -----
+clear_old_objects:
+    call clear_old_obstacles
+    call clear_old_coins
+    ret
+
+
+; ----- UPDATE ALL OBJECT POSITIONS -----
+update_all_objects:
+    call update_obstacles
+    call update_coins
+    ret
+
+
+; ----- UPDATE SCROLLING LANE DIVIDERS -----
+update_lane_scroll:
+    push ax
+    
+    add word [lane_offset], SCROLL_SPEED
+    cmp word [lane_offset], LANE_PATTERN_SIZE
+    jl .no_reset
+    sub word [lane_offset], LANE_PATTERN_SIZE
+    
+.no_reset:
+    ; Sync border offset with lane offset
+    mov ax, [lane_offset]
+    mov [border_offset], ax
+    
+    pop ax
+    ret
+
+
+; ----- DRAW ALL GAME OBJECTS -----
+draw_all_objects:
+    call draw_obstacles
+    call draw_coins
+    call draw_lane_dividers
+    call draw_road_borders
+    call draw_player_car
+    ret
+
+
+; ----- SPAWN NEW OBJECTS (OBSTACLES AND COINS) -----
+spawn_objects:
+    call check_spawn_obstacle
+    call check_spawn_coin
+    ret
+
+
+; ----- UPDATE ALL GAME TIMERS -----
+update_game_timers:
+    inc word [spawn_timer]
+    inc word [coin_timer]
+    ret
+
+
+
+
+; ==================== COLLISION SYSTEM ====================
+
+; ----- CHECK ALL COLLISIONS -----
+check_collisions:
+    push ax
+    push bx
+    
+    ; Check all obstacles
+    xor bx, bx
+.check_obstacles:
+    cmp bx, 3
+    jge .check_coins
+    
+    call check_obstacle_collision
+    
+    inc bx
+    jmp .check_obstacles
+    
+.check_coins:
+    ; Check all coins
+    xor bx, bx
+.coin_loop:
+    cmp bx, 5
+    jge .done
+    
+    call check_coin_collision
+    
+    inc bx
+    jmp .coin_loop
+    
+.done:
+    call draw_player_car
+    
+    pop bx
+    pop ax
+    ret
+
+
+; ----- CHECK COLLISION BETWEEN PLAYER AND ONE OBSTACLE -----
+; Input: BX = obstacle index
+check_obstacle_collision:
+    push ax
+    push cx
+    push dx
+    push si
+    push di
+    
+    ; Check if active
+    cmp byte [obstacle_active + bx], 0
+    je .no_collision
+    
+    ; Get obstacle position
+    push bx
+    shl bx, 1
+    mov ax, [obstacle_x + bx]
+    mov dx, [obstacle_y + bx]
+    shr bx, 1
+    
+    ; Player box 
+    mov si, [player_x]
+    mov di, [player_y]
+    
+    ; Check horizontal overlap
+    mov cx, ax
+    add cx, CAR_WIDTH
+    cmp cx, si
+    jl .no_collision_pop
+    
+    mov cx, si
+    add cx, CAR_WIDTH
+    cmp cx, ax
+    jl .no_collision_pop
+    
+    ; Check vertical overlap
+    mov cx, dx
+    add cx, CAR_HEIGHT
+    cmp cx, di
+    jl .no_collision_pop
+    
+    mov cx, di
+    add cx, CAR_HEIGHT
+    cmp cx, dx
+    jl .no_collision_pop
+    
+    ; Collision detected!
+    pop bx
+    call handle_obstacle_collision
+    jmp .done
+    
+.no_collision_pop:
+    pop bx
+.no_collision:
+.done:
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop ax
+    ret
+
+
+; ----- CHECK COLLISION BETWEEN PLAYER AND ONE COIN -----
+; Input: BX = coin index
+check_coin_collision:
+    push ax
+    push cx
+    push dx
+    push si
+    push di
+    
+    ; Check if active
+    cmp byte [coin_active + bx], 0
+    je .no_collision
+    
+    ; Get coin center position
+    push bx
+    shl bx, 1
+    mov ax, [coin_x + bx]
+    mov dx, [coin_y + bx]
+    shr bx, 1
+    
+    ; Convert to top-left (coin is 10x10)
+    sub ax, COIN_HALF_SIZE
+    sub dx, COIN_HALF_SIZE
+    
+    ; Player box
+    mov si, [player_x]
+    mov di, [player_y]
+    
+    ; Check horizontal overlap
+    mov cx, ax
+    add cx, COIN_SIZE
+    cmp cx, si
+    jl .no_collision_pop
+    
+    mov cx, si
+    add cx, CAR_WIDTH
+    cmp cx, ax
+    jl .no_collision_pop
+    
+    ; Check vertical overlap
+    mov cx, dx
+    add cx, COIN_SIZE
+    cmp cx, di
+    jl .no_collision_pop
+    
+    mov cx, di
+    add cx, CAR_HEIGHT
+    cmp cx, dx
+    jl .no_collision_pop
+    
+    ; Collision detected!
+    pop bx
+    call handle_coin_collection
+    jmp .done
+    
+.no_collision_pop:
+    pop bx
+.no_collision:
+.done:
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop ax
+    ret
+
+
+; ----- HANDLE OBSTACLE COLLISION -----
+; Input: BX = obstacle index
+handle_obstacle_collision:
+    push ax
+    push bx
+    push dx
+    
+    ; Deactivate obstacle
+    mov byte [obstacle_active + bx], 0
+    dec byte [obstacle_count]
+    
+    ; Get position and clear from screen
+    push bx
+    shl bx, 1
+    mov ax, [obstacle_x + bx]
+    mov dx, [obstacle_y + bx]
+    shr bx, 1
+    
+    push bx
+    mov bx, ax
+    call clear_car_area
+    pop bx
+    pop bx
+    
+    pop dx
+    pop bx
+    pop ax
+    ret
+
+
+; ----- HANDLE COIN COLLECTION -----
+; Input: BX = coin index
+handle_coin_collection:
+    push ax
+    push bx
+    push dx
+    
+    ; Deactivate coin
+    mov byte [coin_active + bx], 0
+    dec byte [coin_count]
+    
+    ; Increase score
+    add word [score], 10
+    
+    ; Get position and clear from screen
+    push bx
+    shl bx, 1
+    mov ax, [coin_x + bx]
+    mov dx, [coin_y + bx]
+    shr bx, 1
+    
+    push bx
+    mov bx, ax
+    call clear_coin_area
+    pop bx
+    pop bx
+    
+    pop dx
+    pop bx
+    pop ax
+    ret
+
+
+
+
+; ==================== PLAYER MOVEMENT SYSTEM ====================
+
+; ----- MOVE PLAYER LEFT -----
+move_player_left:
+    push ax
+    push bx
+    push dx
+    
+    ; Check if already in leftmost lane
+    cmp byte [player_lane], 0
+    je .done
+    
+    ; Clear old position
+    mov bx, [player_x]
+    mov dx, [player_y]
+    call clear_car_area
+    
+    ; Move to previous lane
+    dec byte [player_lane]
+    
+    ; Update X position based on lane
+    mov al, [player_lane]
+    call calculate_lane_x
+    mov [player_x], ax
+    
+.done:
+    pop dx
+    pop bx
+    pop ax
+    ret
+
+
+; ----- MOVE PLAYER RIGHT -----
+move_player_right:
+    push ax
+    push bx
+    push dx
+    
+    ; Check if already in rightmost lane
+    cmp byte [player_lane], 2
+    je .done
+    
+    ; Clear old position
+    mov bx, [player_x]
+    mov dx, [player_y]
+    call clear_car_area
+    
+    ; Move to next lane
+    inc byte [player_lane]
+    
+    ; Update X position based on lane
+    mov al, [player_lane]
+    call calculate_lane_x
+    mov [player_x], ax
+    
+.done:
+    pop dx
+    pop bx
+    pop ax
+    ret
+
+
+; ----- MOVE PLAYER UP -----
+move_player_up:
+    push ax
+    push bx
+    push dx
+    
+    ; Check if already at top (below title bar)
+    cmp word [player_y], 25
+    jle .done
+    
+    ; Clear old position
+    mov bx, [player_x]
+    mov dx, [player_y]
+    call clear_car_area
+    
+    ; Move up by CAR_HEIGHT pixels (one block)
+    sub word [player_y], CAR_HEIGHT
+    
+    ; Ensure we don't go too high
+    cmp word [player_y], 25
+    jge .done
+    mov word [player_y], 25
+    
+.done:
+    pop dx
+    pop bx
+    pop ax
+    ret
+
+
+; ----- MOVE PLAYER DOWN -----
+move_player_down:
+    push ax
+    push bx
+    push dx
+    
+    ; Calculate maximum Y position (screen height - car height)
+    mov ax, SCREEN_HEIGHT
+    sub ax, CAR_HEIGHT
+    
+    ; Check if already at bottom
+    cmp word [player_y], ax
+    jge .done
+    
+    ; Clear old position
+    mov bx, [player_x]
+    mov dx, [player_y]
+    call clear_car_area
+    
+    ; Move down by CAR_HEIGHT pixels (one block)
+    add word [player_y], CAR_HEIGHT
+    
+    ; Ensure we don't go too low
+    mov ax, SCREEN_HEIGHT
+    sub ax, CAR_HEIGHT
+    cmp word [player_y], ax
+    jle .done
+    mov word [player_y], ax
+    
+.done:
+    pop dx
+    pop bx
+    pop ax
+    ret
+
+
+; ----- CALCULATE X POSITION FROM LANE NUMBER -----
+; Input: AL = lane number (0, 1, 2)
+; Output: AX = X position (centered)
+calculate_lane_x:
+    push bx
+    
+    cmp al, 0
+    je .lane0
+    cmp al, 1
+    je .lane1
+    ; Lane 2
+    mov ax, LANE3_CENTER
+    jmp .center_car
+    
+.lane0:
+    mov ax, LANE1_CENTER
+    jmp .center_car
+    
+.lane1:
+    mov ax, LANE2_CENTER
+    
+.center_car:
+    ; Center the car in lane 
+    sub ax, 9
+    
+    pop bx
+    ret
 
 
 
@@ -179,7 +774,6 @@ draw_background:
     pop cx
     pop ax
     ret
-
 
 
 ; ----- DRAW GRAY ROAD IN CENTER -----
@@ -209,7 +803,6 @@ draw_road:
     pop bx
     pop ax
     ret
-
 
 
 ; ----- DRAW YELLOW AND BLACK STRIPED ROAD BORDERS ON BOTH SIDES OF ROAD -----
@@ -307,8 +900,7 @@ draw_road_borders:
     ret
 
 
-
-; ----- DRAW TWO DASHED WHITE LANE DIVIDER LINES (between 3 lanes) -----
+; ----- DRAW TWO DASHED WHITE LANE DIVIDER LINES -----
 draw_lane_dividers:
     push ax
     push bx
@@ -399,7 +991,6 @@ draw_lane_dividers:
     ret
 
 
-
 ; ----- DRAW TREES on both sides of road -----
 draw_trees:
     push ax
@@ -470,7 +1061,6 @@ draw_trees:
     pop bx
     pop ax
     ret
-
 
 
 ; ----- DRAW CHERRY BLOSSOM TREE at position BX (X), DX (Y) -----
@@ -626,7 +1216,6 @@ draw_pixel_tree:
     ret
 
 
-
 ; ----- DRAW TITLE BAR AT TOP WITH VALUES ----- 
 draw_title_bar:
     push ax
@@ -654,6 +1243,25 @@ draw_title_bar:
     jl .bar_loop_y
     pop es
 
+    ; Check if game has started
+    cmp byte [game_started], 0
+    jne .show_normal_title
+    
+    ; Show start message
+    mov ah, 0x13              ; Write string function
+    mov al, 0x01               
+    mov bh, 0                
+    mov bl, 0x0F              ; white text
+    mov cx, 22                ; String length
+    mov dh, 1                 ; Row 
+    mov dl, 9                 ; Column
+    push cs
+    pop es
+    mov bp, start_message
+    int 0x10
+    jmp .done_text
+
+.show_normal_title:
     ; Display main title text
     mov ah, 0x13              ; Write string function
     mov al, 0x01               
@@ -688,11 +1296,710 @@ draw_title_bar:
     mov ax, [fuel]            ; Get fuel value
     call print_number         ; Print the number
 
+.done_text:
     pop es
     pop bp
     pop dx
     pop cx
     pop bx
+    pop ax
+    ret
+
+; ----- UPDATE SCORE + FUEL NUMBERS -----
+update_title_numbers:
+    push ax
+    push bx
+    push cx
+    push dx
+
+    ; --- Update SCORE (row 1, col 7) ---
+    mov ah, 0x02      ; set cursor pos
+    mov bh, 0
+    mov dh, 1
+    mov dl, 7
+    int 0x10
+
+    mov ax, [score]
+    call print_number
+
+    ; --- Update FUEL (row 1, col 37) ---
+    mov ah, 0x02
+    mov bh, 0
+    mov dh, 1
+    mov dl, 37
+    int 0x10
+
+    mov ax, [fuel]
+    call print_number
+
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+
+; ----- DRAW RED PLAYER CAR -----
+draw_player_car:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+
+    mov bx, [player_x]        ; Dynamic X position
+    mov si, [player_y]        ; Dynamic Y position
+    mov dx, si                ; Current Y for drawing
+    mov di, bx                ; Save starting X in DI
+    
+    ; Row 0 - slim top (12 pixels)
+    mov cx, 12
+    push bx
+    add bx, 3
+.row0:
+    push cx
+    mov cx, bx
+    mov al, COLOR_RED
+    call put_pixel
+    pop cx
+    inc bx
+    loop .row0
+    pop bx
+    inc dx
+
+    ; Rows 1-2 - medium (14 pixels)
+    mov ax, 2
+.rows1_2:
+    push ax
+    mov cx, 14
+    push bx
+    add bx, 2
+.row1_2_col:
+    push cx
+    mov cx, bx
+    mov al, COLOR_RED
+    call put_pixel
+    pop cx
+    inc bx
+    loop .row1_2_col
+    pop bx
+    inc dx
+    pop ax
+    dec ax
+    jnz .rows1_2
+
+    ; Rows 3-4 - full width (18 pixels)
+    mov ax, 2
+.rows3_4:
+    push ax
+    mov cx, 18
+    push bx
+.row3_4_col:
+    push cx
+    mov cx, bx
+    mov al, COLOR_RED
+    call put_pixel
+    pop cx
+    inc bx
+    loop .row3_4_col
+    pop bx
+    inc dx
+    pop ax
+    dec ax
+    jnz .rows3_4
+
+    ; Rows 5-8 - windshield area (body with window)
+    mov ax, 4
+.rows5_8:
+    push ax
+    mov cx, 18
+    push bx
+.row5_8_col:
+    push cx
+    mov cx, bx
+    push bx
+    sub bx, di                ; use DI (starting X) 
+    cmp bx, 3
+    jl .red_pixel
+    cmp bx, 15
+    jge .red_pixel
+    mov al, COLOR_BLACK       ; Window
+    jmp .draw_pix
+.red_pixel:
+    mov al, COLOR_RED
+.draw_pix:
+    pop bx
+    call put_pixel
+    pop cx
+    inc bx
+    loop .row5_8_col
+    pop bx
+    inc dx
+    pop ax
+    dec ax
+    jnz .rows5_8
+
+    ; Rows 9-23 - full body (18 pixels)
+    mov ax, 15
+.rows9_23:
+    push ax
+    mov cx, 18
+    push bx
+.row9_23_col:
+    push cx
+    mov cx, bx
+    mov al, COLOR_RED
+    call put_pixel
+    pop cx
+    inc bx
+    loop .row9_23_col
+    pop bx
+    inc dx
+    pop ax
+    dec ax
+    jnz .rows9_23
+
+    ; Rows 24-27 - body with tires (18 pixels)
+    mov ax, 4
+.rows24_27:
+    push ax
+    mov cx, 18
+    push bx
+.row24_27_col:
+    push cx
+    mov cx, bx
+    push bx
+    sub bx, di                ; use DI (starting X)
+    cmp bx, 4
+    jge .check_right
+    mov al, COLOR_BLACK       ; Left tire
+    jmp .draw_tire
+.check_right:
+    cmp bx, 14
+    jl .red_tire
+    mov al, COLOR_BLACK       ; Right tire
+    jmp .draw_tire
+.red_tire:
+    mov al, COLOR_RED
+.draw_tire:
+    pop bx
+    call put_pixel
+    pop cx
+    inc bx
+    loop .row24_27_col
+    pop bx
+    inc dx
+    pop ax
+    dec ax
+    jnz .rows24_27
+
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+
+
+
+; ==================== OBJECT RENDERING ====================
+
+; ----- DRAW ALL ACTIVE OBSTACLES -----
+draw_obstacles:
+    push ax
+    push bx
+    push cx
+    push dx
+    
+    xor bx, bx
+.loop:
+    cmp bx, 3
+    jge   .done
+    
+    ; Check if active
+    cmp byte [obstacle_active + bx], 0
+    je   .next
+    
+    ; Get position
+    push bx
+    shl bx, 1
+    mov ax, [obstacle_x + bx]
+    mov dx, [obstacle_y + bx]
+    shr bx, 1
+    
+    ; Draw the car
+    push bx
+    mov bx, ax                ; X position
+    call draw_blue_car
+    pop bx
+    
+    pop bx
+    
+.next:
+    inc bx
+    jmp   .loop
+    
+.done:
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+
+; ----- DRAW BLUE OBSTACLE CAR at BX (X), DX (Y) -----
+draw_blue_car:
+    push ax
+    push cx
+    push dx
+    push si
+    push di
+    
+    mov si, bx                ; Save X
+    mov di, dx                ; Save Y
+    
+    ; Check if car is too high (in title area)
+    cmp di, 22
+    jge .start_drawing
+    jmp .done_early
+    
+.start_drawing:    
+    ; Row 0 - top (slim)
+    mov cx, 12
+    mov bx, si
+    add bx, 3
+.row0:
+    push cx
+    mov cx, bx
+    mov dx, di
+    cmp dx, 20                ; Skip if in title
+    jle   .skip0
+    mov al, COLOR_BLUE
+    call put_pixel
+.skip0:
+    pop cx
+    inc bx
+    loop .row0
+    inc di
+
+    ; Rows 1-2 - medium
+    mov ax, 2
+.rows1_2:
+    push ax
+    mov cx, 14
+    mov bx, si
+    add bx, 2
+.r1_2:
+    push cx
+    mov cx, bx
+    mov dx, di
+    cmp dx, 20
+    jle   .skip1_2
+    mov al, COLOR_BLUE
+    call put_pixel
+.skip1_2:
+    pop cx
+    inc bx
+    loop .r1_2
+    inc di
+    pop ax
+    dec ax
+    jnz   .rows1_2
+
+    ; Rows 3-4 - full width
+    mov ax, 2
+.rows3_4:
+    push ax
+    mov cx, 18
+    mov bx, si
+.r3_4:
+    push cx
+    mov cx, bx
+    mov dx, di
+    cmp dx, 20
+    jle   .skip3_4
+    mov al, COLOR_BLUE
+    call put_pixel
+.skip3_4:
+    pop cx
+    inc bx
+    loop .r3_4
+    inc di
+    pop ax
+    dec ax
+    jnz   .rows3_4
+
+    ; Rows 5-8 - windshield
+    mov ax, 4
+.rows5_8:
+    push ax
+    mov cx, 18
+    mov bx, si
+.r5_8:
+    push cx
+    push bx
+    sub bx, si
+    cmp bx, 3
+    jl short .blue_wind
+    cmp bx, 15
+    jge short .blue_wind
+    mov al, COLOR_BLACK
+    jmp short .draw_wind
+.blue_wind:
+    mov al, COLOR_BLUE
+.draw_wind:
+    pop bx
+    mov cx, bx
+    mov dx, di
+    cmp dx, 20
+    jle short .skip5_8
+    call put_pixel
+.skip5_8:
+    pop cx
+    inc bx
+    loop .r5_8
+    inc di
+    pop ax
+    dec ax
+    jnz   .rows5_8
+
+   ; Rows 9-23 - body 
+mov ax, 15
+.rows9_23_blue:
+    push ax
+    mov cx, 18
+    mov bx, si
+.r9_23_blue_col:
+    push cx
+    mov cx, bx
+    mov dx, di
+    cmp dx, 20
+    jle   .skip9_23_blue
+    mov al, COLOR_BLUE
+    call put_pixel
+.skip9_23_blue:
+    pop cx
+    inc bx
+    loop .r9_23_blue_col
+    inc di
+    pop ax
+    dec ax
+    jnz   .rows9_23_blue
+
+    ; Rows 24-28 - with tires
+    mov ax, 4
+.rows24_28:
+    push ax
+    mov cx, 18
+    mov bx, si
+.r24_28:
+    push cx
+    push bx
+    sub bx, si
+    cmp bx, 4
+    jge   .check_right
+    mov al, COLOR_BLACK
+    jmp   .draw_tire
+.check_right:
+    cmp bx, 14
+    jl   .blue_tire
+    mov al, COLOR_BLACK
+    jmp   .draw_tire
+.blue_tire:
+    mov al, COLOR_BLUE
+.draw_tire:
+    pop bx
+    mov cx, bx
+    mov dx, di
+    cmp dx, 20
+    jle   .skip_tire
+    call put_pixel
+.skip_tire:
+    pop cx
+    inc bx
+    loop .r24_28
+    inc di
+    pop ax
+    dec ax
+    jnz   .rows24_28
+
+.done_early:
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop ax
+    ret
+
+
+; ----- DRAW ALL ACTIVE COINS -----
+draw_coins:
+    push ax
+    push bx
+    push cx
+    push dx
+    
+    xor bx, bx
+.loop:
+    cmp bx, 5
+    jge   .done
+    
+    ; Check if active
+    cmp byte [coin_active + bx], 0
+    je   .next
+    
+    ; Get position
+    push bx
+    shl bx, 1
+    mov ax, [coin_x + bx]
+    mov dx, [coin_y + bx]
+    shr bx, 1
+    
+    ; Draw the coin
+    push bx
+    mov bx, ax
+    call draw_coin
+    pop bx
+    
+    pop bx
+    
+.next:
+    inc bx
+    jmp   .loop
+    
+.done:
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+
+; ----- DRAW COIN at BX (X), DX (Y) -----
+draw_coin:
+    push ax
+    push cx
+    push dx
+    push si
+    push di
+    
+    mov si, bx                ; Save X (center)
+    mov di, dx                ; Save Y (center)
+    
+    ; Check if coin is in title bar area
+    cmp di, 25
+    jge .start_drawing
+    jmp .done_early
+    
+.start_drawing:
+    sub si, 5
+    sub di, 5
+    
+    ; Row 0 - top (4 pixels) - white highlight
+    mov cx, si
+    add cx, 3
+    mov dx, di
+    mov bx, 4
+.r0:
+    cmp dx, 20
+    jl   .r0_skip
+    push cx
+    mov al, COLOR_WHITE
+    call put_pixel
+    pop cx
+.r0_skip:
+    inc cx
+    dec bx
+    jnz   .r0
+    inc di
+
+    ; Row 1 - (6 pixels) - white + yellow
+    mov cx, si
+    add cx, 2
+    mov dx, di
+    mov bx, 1
+.r1_white:
+    cmp dx, 20
+    jl   .r1w_skip
+    push cx
+    mov al, COLOR_WHITE
+    call put_pixel
+    pop cx
+.r1w_skip:
+    inc cx
+    dec bx
+    jnz   .r1_white
+    
+    mov bx, 5
+.r1_yellow:
+    cmp dx, 20
+    jl   .r1y_skip
+    push cx
+    mov al, COLOR_YELLOW
+    call put_pixel
+    pop cx
+.r1y_skip:
+    inc cx
+    dec bx
+    jnz   .r1_yellow
+    inc di
+
+    ; Rows 2-3 - (8 pixels wide) - all yellow
+    mov ax, 2
+.r2_3:
+    push ax
+    mov cx, si
+    add cx, 1
+    mov dx, di
+    mov bx, 8
+.r2_3_px:
+    cmp dx, 20
+    jl short .r2_3_skip
+    push cx
+    mov al, COLOR_YELLOW
+    call put_pixel
+    pop cx
+.r2_3_skip:
+    inc cx
+    dec bx
+    jnz short .r2_3_px
+    inc di
+    pop ax
+    dec ax
+    jnz   .r2_3
+
+    ; Rows 4-5 - (8 pixels) - yellow + dark edge
+    mov ax, 2
+.r4_5:
+    push ax
+    mov cx, si
+    add cx, 1
+    mov dx, di
+    mov bx, 7
+.r4_5_yellow:
+    cmp dx, 20
+    jl short .r4_5y_skip
+    push cx
+    mov al, COLOR_YELLOW
+    call put_pixel
+    pop cx
+.r4_5y_skip:
+    inc cx
+    dec bx
+    jnz short .r4_5_yellow
+    
+    mov bx, 1
+.r4_5_dark:
+    cmp dx, 20
+    jl short .r4_5d_skip
+    push cx
+    mov al, COLOR_ORANGE
+    call put_pixel
+    pop cx
+.r4_5d_skip:
+    inc cx
+    dec bx
+    jnz short .r4_5_dark
+    
+    inc di
+    pop ax
+    dec ax
+    jnz   .r4_5
+
+    ; Rows 6-7 - (8 pixels) - yellow + more dark
+    mov ax, 2
+.r6_7:
+    push ax
+    mov cx, si
+    add cx, 1
+    mov dx, di
+    mov bx, 5
+.r6_7_yellow:
+    cmp dx, 20
+    jl short .r6_7y_skip
+    push cx
+    mov al, COLOR_YELLOW
+    call put_pixel
+    pop cx
+.r6_7y_skip:
+    inc cx
+    dec bx
+    jnz short .r6_7_yellow
+    
+    mov bx, 3
+.r6_7_dark:
+    cmp dx, 20
+    jl short .r6_7d_skip
+    push cx
+    mov al, COLOR_ORANGE
+    call put_pixel
+    pop cx
+.r6_7d_skip:
+    inc cx
+    dec bx
+    jnz short .r6_7_dark
+    
+    inc di
+    pop ax
+    dec ax
+    jnz   .r6_7
+
+    ; Row 8 - (6 pixels) - yellow + dark
+    mov cx, si
+    add cx, 2
+    mov dx, di
+    mov bx, 3
+.r8_yellow:
+    cmp dx, 20
+    jl   .r8y_skip
+    push cx
+    mov al, COLOR_YELLOW
+    call put_pixel
+    pop cx
+.r8y_skip:
+    inc cx
+    dec bx
+    jnz   .r8_yellow
+    
+    mov bx, 3
+.r8_dark:
+    cmp dx, 20
+    jl   .r8d_skip
+    push cx
+    mov al, COLOR_ORANGE
+    call put_pixel
+    pop cx
+.r8d_skip:
+    inc cx
+    dec bx
+    jnz   .r8_dark
+    inc di
+
+    ; Row 9 - bottom (4 pixels) - dark shadow
+    mov cx, si
+    add cx, 3
+    mov dx, di
+    mov bx, 4
+.r9:
+    cmp dx, 20
+    jl   .r9_skip
+    push cx
+    mov al, COLOR_ORANGE
+    call put_pixel
+    pop cx
+.r9_skip:
+    inc cx
+    dec bx
+    jnz   .r9
+
+.done_early:
+    pop di
+    pop si
+    pop dx
+    pop cx
     pop ax
     ret
 
@@ -711,11 +2018,11 @@ clear_old_obstacles:
     xor bx, bx
 .loop:
     cmp bx, 3
-    jge near .done
+    jge   .done
     
     ; Check if active
     cmp byte [obstacle_active + bx], 0
-    je near .next
+    je   .next
     
     ; Get OLD position
     push bx
@@ -734,7 +2041,7 @@ clear_old_obstacles:
     
 .next:
     inc bx
-    jmp near .loop
+    jmp   .loop
     
 .done:
     pop dx
@@ -742,7 +2049,6 @@ clear_old_obstacles:
     pop bx
     pop ax
     ret
-
 
 
 ; ----- Clear coins at their OLD positions -----
@@ -755,11 +2061,11 @@ clear_old_coins:
     xor bx, bx
 .loop:
     cmp bx, 5
-    jge near .done
+    jge   .done
     
     ; Check if active
     cmp byte [coin_active + bx], 0
-    je near .next
+    je   .next
     
     ; Get OLD position
     push bx
@@ -778,7 +2084,7 @@ clear_old_coins:
     
 .next:
     inc bx
-    jmp near .loop
+    jmp   .loop
     
 .done:
     pop dx
@@ -786,7 +2092,6 @@ clear_old_coins:
     pop bx
     pop ax
     ret
-
 
 
 ; ----- Clear a car-sized area (18x28) at BX (X), DX (Y) -----
@@ -848,7 +2153,6 @@ clear_car_area:
     pop cx
     pop ax
     ret
-
 
 
 ; ----- Clear a coin-sized area at BX (X), DX (Y) -----
@@ -916,7 +2220,181 @@ clear_coin_area:
 
 
 
-; ==================== COIN MANAGEMENT ====================
+; ==================== OBJECT MANAGEMENT ====================
+
+; ------ UPDATE OBSTACLE POSITIONS (move them down) -----
+update_obstacles:
+    push ax
+    push bx
+    push cx
+    
+    xor bx, bx
+.loop:
+    cmp bx, 3
+    jge   .done
+    
+    ; Check if active
+    cmp byte [obstacle_active + bx], 0
+    je   .next
+    
+    ; Get Y position
+    push bx
+    shl bx, 1
+    
+    ; Save old Y
+    mov ax, [obstacle_y + bx]
+    mov [obstacle_old_y + bx], ax
+    
+    ; Move down by SCROLL_SPEED pixels
+    add ax, SCROLL_SPEED
+    
+    ; Check if off screen
+    cmp ax, SCREEN_HEIGHT
+    jl   .keep
+    
+    ; Deactivate this obstacle
+    shr bx, 1
+    mov byte [obstacle_active + bx], 0
+    dec byte [obstacle_count]
+    pop bx
+    jmp   .next
+    
+.keep:
+    mov [obstacle_y + bx], ax
+    pop bx
+    
+.next:
+    inc bx
+    jmp   .loop
+    
+.done:
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+
+; ----- UPDATE COIN POSITIONS (move them down) -----
+update_coins:
+    push ax
+    push bx
+    push cx
+    
+    xor bx, bx
+.loop:
+    cmp bx, 5
+    jge   .done
+    
+    ; Check if active
+    cmp byte [coin_active + bx], 0
+    je   .next
+    
+    ; Get Y position
+    push bx
+    shl bx, 1
+    
+    ; Save old Y
+    mov ax, [coin_y + bx]
+    mov [coin_old_y + bx], ax
+    
+    ; Move down by SCROLL_SPEED pixels
+    add ax, SCROLL_SPEED
+    
+    ; Check if completely off screen (add buffer for coin size)
+    cmp ax, SCREEN_HEIGHT + 15
+    jl   .keep
+    
+    ; Deactivate this coin
+    shr bx, 1
+    mov byte [coin_active + bx], 0
+    dec byte [coin_count]
+    pop bx
+    jmp   .next
+    
+.keep:
+    mov [coin_y + bx], ax
+    pop bx
+    
+.next:
+    inc bx
+    jmp   .loop
+    
+.done:
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+
+; ----- Check if it's time to spawn a new obstacle -----
+check_spawn_obstacle:
+    push ax
+    push bx
+    push dx
+    
+    ; Check spawn timer (spawn every 50 frames)
+    cmp word [spawn_timer], OBSTACLE_SPAWN_TIME
+    jl   .done
+    
+    ; Reset timer
+    mov word [spawn_timer], 0
+    
+    ; Check if we already have max obstacles (3)
+    cmp byte [obstacle_count], 3
+    jge   .done
+    
+    ; Find empty slot
+    xor bx, bx
+.find_slot:
+    cmp bx, 3
+    jge   .done
+    
+    cmp byte [obstacle_active + bx], 0
+    je   .spawn_here
+    
+    inc bx
+    jmp   .find_slot
+    
+.spawn_here:
+    ; Get random lane that doesn't have an obstacle OR coin
+    call get_free_lane
+    cmp al, 0xFF
+    je   .done                  ; No free lane
+    
+    ; Mark as active
+    mov byte [obstacle_active + bx], 1
+    inc byte [obstacle_count]
+    
+    ; Calculate X position based on lane
+    cmp al, 0
+    je   .lane_left
+    cmp al, 1
+    je   .lane_middle
+    ; Lane right
+    mov ax, LANE3_CENTER
+    jmp   .set_x
+.lane_left:
+    mov ax, LANE1_CENTER
+    jmp   .set_x
+.lane_middle:
+    mov ax, LANE2_CENTER
+    
+.set_x:
+    ; Center the car in lane
+    sub ax, 9                           ; Half of car width
+    
+    ; Store position
+    shl bx, 1                           ; BX * 2 for word array
+    mov [obstacle_x + bx], ax
+    mov word [obstacle_y + bx], SPAWN_Y_POSITION        ; Start position
+    mov word [obstacle_old_y + bx], SPAWN_Y_POSITION    ; Initialize old position
+    
+.done:
+    pop dx
+    pop bx
+    pop ax
+    ret
+
 
 ; ----- Check if it's time to spawn a new coin -----
 check_spawn_coin:
@@ -925,33 +2403,33 @@ check_spawn_coin:
     push dx
     
     ; Check coin timer (spawn every 35 frames)
-    cmp word [coin_timer], 35
-    jl near .done
+    cmp word [coin_timer], COIN_SPAWN_TIME
+    jl   .done
     
     ; Reset timer
     mov word [coin_timer], 0
     
     ; Check if we already have max coins (5)
     cmp byte [coin_count], 5
-    jge near .done
+    jge   .done
     
     ; Find empty slot
     xor bx, bx
 .find_slot:
     cmp bx, 5
-    jge near .done
+    jge   .done
     
     cmp byte [coin_active + bx], 0
-    je near .spawn_here
+    je   .spawn_here
     
     inc bx
-    jmp near .find_slot
+    jmp   .find_slot
     
 .spawn_here:
     ; Get random lane that doesn't have an obstacle OR coin
     call get_free_lane
     cmp al, 0xFF
-    je near .done                  ; No free lane
+    je   .done                  ; No free lane
     
     ; Mark as active
     mov byte [coin_active + bx], 1
@@ -959,15 +2437,15 @@ check_spawn_coin:
     
     ; Calculate X position based on lane (al = 0, 1, or 2)
     cmp al, 0
-    je near .lane_left
+    je   .lane_left
     cmp al, 1
-    je near .lane_middle
+    je   .lane_middle
     ; Lane right
     mov ax, LANE3_CENTER
-    jmp near .set_x
+    jmp   .set_x
 .lane_left:
     mov ax, LANE1_CENTER
-    jmp near .set_x
+    jmp   .set_x
 .lane_middle:
     mov ax, LANE2_CENTER
     
@@ -976,15 +2454,14 @@ check_spawn_coin:
     ; Store position
     shl bx, 1
     mov [coin_x + bx], ax           ; Store exact lane center
-    mov word [coin_y + bx], 25      ; Start position
-    mov word [coin_old_y + bx], 25  ; Initialize old position
+    mov word [coin_y + bx], SPAWN_Y_POSITION    
+    mov word [coin_old_y + bx], SPAWN_Y_POSITION
     
 .done:
     pop dx
     pop bx
     pop ax
     ret
-
 
 
 ; ----- Get a random lane that doesn't have an obstacle car OR coin in it -----
@@ -1009,20 +2486,20 @@ get_free_lane:
     pop ax
     
     cmp dl, 1
-    je near .found_free
+    je   .found_free
     
     ; Try next lane
     inc al
     cmp al, 3
-    jl near .no_wrap
+    jl   .no_wrap
     xor al, al
 .no_wrap:
     dec cl
-    jnz near .try_lane
+    jnz   .try_lane
     
     ; No free lane found
     mov al, 0xFF
-    jmp near .done
+    jmp   .done
     
 .found_free:
     ; AL already has the lane number
@@ -1032,7 +2509,6 @@ get_free_lane:
     pop cx
     pop bx
     ret
-
 
 
 ; ----- Check if a lane is free from both obstacles AND coins -----
@@ -1045,14 +2521,14 @@ is_lane_free_complete:
     
     ; Convert lane to X center
     cmp al, 0
-    je near .lane0
+    je   .lane0
     cmp al, 1
-    je near .lane1
+    je   .lane1
     mov ax, LANE3_CENTER
-    jmp near .check
+    jmp   .check
 .lane0:
     mov ax, LANE1_CENTER
-    jmp near .check
+    jmp   .check
 .lane1:
     mov ax, LANE2_CENTER
     
@@ -1063,82 +2539,82 @@ is_lane_free_complete:
     xor bx, bx
 .loop_obstacles:
     cmp bx, 3
-    jge near .check_coins
+    jge   .check_coins
     
     ; Check if active
     cmp byte [obstacle_active + bx], 0
-    je near .next_obstacle
+    je   .next_obstacle
     
     ; Get obstacle X
     push bx
     shl bx, 1
     mov ax, [obstacle_x + bx]
     
-    ; Check Y position (only check if obstacle is near spawn area)
+    ; Check Y position (only check if obstacle is   spawn area)
     mov dx, [obstacle_y + bx]
     shr bx, 1
     
-    cmp dx, 100               ; Only check if in upper half of screen
-    jg near .next_obstacle_pop
+    cmp dx, SPAWN_CHECK_THRESHOLD             ; Only check if in upper half of screen
+    jg   .next_obstacle_pop
     
     ; Check if in same lane (within 30 pixels)
     sub ax, cx
-    cmp ax, -30
-    jl near .next_obstacle_pop
-    cmp ax, 30
-    jg near .next_obstacle_pop
+    cmp ax, -LANE_CHECK_DISTANCE   
+    jl   .next_obstacle_pop
+    cmp ax, LANE_CHECK_DISTANCE
+    jg   .next_obstacle_pop
     
     ; Obstacle in this lane
     pop bx
     mov dl, 0
-    jmp near .done
+    jmp   .done
     
 .next_obstacle_pop:
     pop bx
 .next_obstacle:
     inc bx
-    jmp near .loop_obstacles
+    jmp   .loop_obstacles
     
 .check_coins:
     ; Check all coins
     xor bx, bx
 .loop_coins:
     cmp bx, 5
-    jge near .is_free
+    jge   .is_free
     
     ; Check if active
     cmp byte [coin_active + bx], 0
-    je near .next_coin
+    je   .next_coin
     
     ; Get coin X
     push bx
     shl bx, 1
     mov ax, [coin_x + bx]
     
-    ; Check Y position (only check if coin is near spawn area)
+    ; Check Y position (only check if coin is   spawn area)
     mov dx, [coin_y + bx]
     shr bx, 1
     
     cmp dx, 100               ; Only check if in upper half of screen
-    jg near .next_coin_pop
+    jg   .next_coin_pop
     
     ; Check if in same lane (within 20 pixels for coins)
     sub ax, cx
     cmp ax, -20
-    jl near .next_coin_pop
+    jl   .next_coin_pop
     cmp ax, 20
-    jg near .next_coin_pop
+    jg   .next_coin_pop
     
     ; Coin in this lane
     pop bx
     mov dl, 0
-    jmp near .done
+    jmp   .done
     
 .next_coin_pop:
     pop bx
 .next_coin:
     inc bx
-    jmp near .loop_coins
+    jmp   .loop_coins
     
 .is_free:
     mov dl, 1
@@ -1152,95 +2628,50 @@ is_lane_free_complete:
 
 
 
-; ----- UPDATE COIN POSITIONS (move them down) -----
-update_coins:
-    push ax
-    push bx
-    push cx
-    
-    xor bx, bx
-.loop:
-    cmp bx, 5
-    jge near .done
-    
-    ; Check if active
-    cmp byte [coin_active + bx], 0
-    je near .next
-    
-    ; Get Y position
-    push bx
-    shl bx, 1
-    
-    ; Save old Y
-    mov ax, [coin_y + bx]
-    mov [coin_old_y + bx], ax
-    
-    ; Move down by 3 pixels 
-    add ax, 3
-    
-    ; Check if completely off screen (add buffer for coin size)
-    cmp ax, SCREEN_HEIGHT + 15
-    jl near .keep
-    
-    ; Deactivate this coin
-    shr bx, 1
-    mov byte [coin_active + bx], 0
-    dec byte [coin_count]
-    pop bx
-    jmp near .next
-    
-.keep:
-    mov [coin_y + bx], ax
-    pop bx
-    
-.next:
-    inc bx
-    jmp near .loop
-    
-.done:
-    pop cx
-    pop bx
-    pop ax
-    ret
+; ==================== PAUSE/CONFIRMATION SYSTEM (FIXED) ====================
 
-
-
-; ----- DRAW ALL ACTIVE COINS -----
-draw_coins:
+; ----- SHOW CONFIRMATION SCREEN -----
+show_confirmation_screen:
     push ax
     push bx
     push cx
     push dx
+    push di
+    push si
+    push es
     
-    xor bx, bx
-.loop:
-    cmp bx, 5
-    jge near .done
+    ; Draw confirmation box
+    call draw_confirmation_box
     
-    ; Check if active
-    cmp byte [coin_active + bx], 0
-    je near .next
+    ; Set up ES for BIOS string functions
+    push cs
+    pop es
     
-    ; Get position
-    push bx
-    shl bx, 1
-    mov ax, [coin_x + bx]
-    mov dx, [coin_y + bx]
-    shr bx, 1
+    ; Message 1: "Do you want to quit?"
+    mov ah, 0x13              ; Write string function
+    mov al, 0x01              ; Update cursor
+    mov bh, 0                 ; Page 0
+    mov bl, 0x0F              ; White text
+    mov cx, 20                ; String length
+    mov dh, 10                ; Row (centered)
+    mov dl, 10                ; Column (centered)
+    mov bp, confirm_msg1
+    int 0x10
     
-    ; Draw the coin
-    push bx
-    mov bx, ax
-    call draw_coin
-    pop bx
+    ; Message 2: "Press Y or N"
+    mov ah, 0x13
+    mov al, 0x01
+    mov bh, 0
+    mov bl, 0x0E              ; Yellow text
+    mov cx, 13                ; String length
+    mov dh, 12                ; Row
+    mov dl, 14                ; Column
+    mov bp, confirm_msg2
+    int 0x10
     
-    pop bx
-    
-.next:
-    inc bx
-    jmp near .loop
-    
-.done:
+    pop es
+    pop si
+    pop di
     pop dx
     pop cx
     pop bx
@@ -1248,397 +2679,80 @@ draw_coins:
     ret
 
 
-
-; ----- DRAW COIN at BX (X), DX (Y) -----
-draw_coin:
+; ----- DRAW CONFIRMATION BOX (DARK OVERLAY) -----
+draw_confirmation_box:
     push ax
+    push bx
     push cx
     push dx
-    push si
     push di
+    push es
     
-    mov si, bx                ; Save X (center)
-    mov di, dx                ; Save Y (center)
+    ; Set ES to video memory
+    mov ax, 0xA000
+    mov es, ax
     
-    ; Check if coin is in title bar area
-    cmp di, 25
-    jge .start_drawing
-    jmp .done_early
+    ; Box dimensions: 166x80 centered at screen
+    mov dx, 60                ; Start Y
     
-.start_drawing:
-    sub si, 5
-    sub di, 5
+.row_loop:
+    cmp dx, 140               ; End Y
+    jge .done
     
-    ; Row 0 - top (4 pixels) - white highlight
-    mov cx, si
-    add cx, 3
-    mov dx, di
-    mov bx, 4
-.r0:
-    cmp dx, 20
-    jl near .r0_skip
-    push cx
+    mov cx, 79                ; Start X
+    
+.col_loop:
+    cmp cx, 245               ; End X
+    jge .next_row
+    
+    ; Determine pixel color
+    mov al, COLOR_BLACK       ; Default to black interior
+    
+    ; Draw white border (2 pixels thick)
+    cmp dx, 60
+    je .make_white
+    cmp dx, 61
+    je .make_white
+    cmp dx, 138
+    je .make_white
+    cmp dx, 139
+    je .make_white
+    cmp cx, 79
+    je .make_white
+    cmp cx, 80
+    je .make_white
+    cmp cx, 243
+    je .make_white
+    cmp cx, 244
+    je .make_white
+    jmp .draw_pixel
+    
+.make_white:
     mov al, COLOR_WHITE
-    call put_pixel
-    pop cx
-.r0_skip:
-    inc cx
-    dec bx
-    jnz near .r0
-    inc di
-
-    ; Row 1 - (6 pixels) - white + yellow
-    mov cx, si
-    add cx, 2
-    mov dx, di
-    mov bx, 1
-.r1_white:
-    cmp dx, 20
-    jl near .r1w_skip
-    push cx
-    mov al, COLOR_WHITE
-    call put_pixel
-    pop cx
-.r1w_skip:
-    inc cx
-    dec bx
-    jnz near .r1_white
     
-    mov bx, 5
-.r1_yellow:
-    cmp dx, 20
-    jl near .r1y_skip
-    push cx
-    mov al, COLOR_YELLOW
-    call put_pixel
-    pop cx
-.r1y_skip:
-    inc cx
-    dec bx
-    jnz near .r1_yellow
-    inc di
-
-    ; Rows 2-3 - (8 pixels wide) - all yellow
-    mov ax, 2
-.r2_3:
+.draw_pixel:
+    ; Calculate video memory offset and draw
     push ax
-    mov cx, si
-    add cx, 1
-    mov dx, di
-    mov bx, 8
-.r2_3_px:
-    cmp dx, 20
-    jl short .r2_3_skip
-    push cx
-    mov al, COLOR_YELLOW
-    call put_pixel
-    pop cx
-.r2_3_skip:
-    inc cx
-    dec bx
-    jnz short .r2_3_px
-    inc di
-    pop ax
-    dec ax
-    jnz near .r2_3
-
-    ; Rows 4-5 - (8 pixels) - yellow + dark edge
-    mov ax, 2
-.r4_5:
-    push ax
-    mov cx, si
-    add cx, 1
-    mov dx, di
-    mov bx, 7
-.r4_5_yellow:
-    cmp dx, 20
-    jl short .r4_5y_skip
-    push cx
-    mov al, COLOR_YELLOW
-    call put_pixel
-    pop cx
-.r4_5y_skip:
-    inc cx
-    dec bx
-    jnz short .r4_5_yellow
-    
-    mov bx, 1
-.r4_5_dark:
-    cmp dx, 20
-    jl short .r4_5d_skip
-    push cx
-    mov al, COLOR_ORANGE
-    call put_pixel
-    pop cx
-.r4_5d_skip:
-    inc cx
-    dec bx
-    jnz short .r4_5_dark
-    
-    inc di
-    pop ax
-    dec ax
-    jnz near .r4_5
-
-    ; Rows 6-7 - (8 pixels) - yellow + more dark
-    mov ax, 2
-.r6_7:
-    push ax
-    mov cx, si
-    add cx, 1
-    mov dx, di
-    mov bx, 5
-.r6_7_yellow:
-    cmp dx, 20
-    jl short .r6_7y_skip
-    push cx
-    mov al, COLOR_YELLOW
-    call put_pixel
-    pop cx
-.r6_7y_skip:
-    inc cx
-    dec bx
-    jnz short .r6_7_yellow
-    
-    mov bx, 3
-.r6_7_dark:
-    cmp dx, 20
-    jl short .r6_7d_skip
-    push cx
-    mov al, COLOR_ORANGE
-    call put_pixel
-    pop cx
-.r6_7d_skip:
-    inc cx
-    dec bx
-    jnz short .r6_7_dark
-    
-    inc di
-    pop ax
-    dec ax
-    jnz near .r6_7
-
-    ; Row 8 - (6 pixels) - yellow + dark
-    mov cx, si
-    add cx, 2
-    mov dx, di
-    mov bx, 3
-.r8_yellow:
-    cmp dx, 20
-    jl near .r8y_skip
-    push cx
-    mov al, COLOR_YELLOW
-    call put_pixel
-    pop cx
-.r8y_skip:
-    inc cx
-    dec bx
-    jnz near .r8_yellow
-    
-    mov bx, 3
-.r8_dark:
-    cmp dx, 20
-    jl near .r8d_skip
-    push cx
-    mov al, COLOR_ORANGE
-    call put_pixel
-    pop cx
-.r8d_skip:
-    inc cx
-    dec bx
-    jnz near .r8_dark
-    inc di
-
-    ; Row 9 - bottom (4 pixels) - dark shadow
-    mov cx, si
-    add cx, 3
-    mov dx, di
-    mov bx, 4
-.r9:
-    cmp dx, 20
-    jl near .r9_skip
-    push cx
-    mov al, COLOR_ORANGE
-    call put_pixel
-    pop cx
-.r9_skip:
-    inc cx
-    dec bx
-    jnz near .r9
-
-.done_early:
-    pop di
-    pop si
-    pop dx
-    pop cx
-    pop ax
-    ret
-
-
-
-
-; ==================== OBSTACLE MANAGEMENT ====================
-
-; ----- Check if it's time to spawn a new obstacle -----
-check_spawn_obstacle:
-    push ax
-    push bx
     push dx
+    mov ax, dx
+    mov bx, SCREEN_WIDTH
+    mul bx
+    add ax, cx
+    mov di, ax
+    pop dx
+    pop ax
+    mov byte [es:di], al
     
-    ; Check spawn timer (spawn every 50 frames)
-    cmp word [spawn_timer], 50
-    jl near .done
+    inc cx
+    jmp .col_loop
     
-    ; Reset timer
-    mov word [spawn_timer], 0
-    
-    ; Check if we already have max obstacles (3)
-    cmp byte [obstacle_count], 3
-    jge near .done
-    
-    ; Find empty slot
-    xor bx, bx
-.find_slot:
-    cmp bx, 3
-    jge near .done
-    
-    cmp byte [obstacle_active + bx], 0
-    je near .spawn_here
-    
-    inc bx
-    jmp near .find_slot
-    
-.spawn_here:
-    ; Get random lane that doesn't have an obstacle OR coin
-    call get_free_lane
-    cmp al, 0xFF
-    je near .done                  ; No free lane
-    
-    ; Mark as active
-    mov byte [obstacle_active + bx], 1
-    inc byte [obstacle_count]
-    
-    ; Calculate X position based on lane
-    cmp al, 0
-    je near .lane_left
-    cmp al, 1
-    je near .lane_middle
-    ; Lane right
-    mov ax, LANE3_CENTER
-    jmp near .set_x
-.lane_left:
-    mov ax, LANE1_CENTER
-    jmp near .set_x
-.lane_middle:
-    mov ax, LANE2_CENTER
-    
-.set_x:
-    ; Center the car in lane
-    sub ax, 9                 ; Half of car width
-    
-    ; Store position
-    shl bx, 1                           ; BX * 2 for word array
-    mov [obstacle_x + bx], ax
-    mov word [obstacle_y + bx], 25      ; Start position
-    mov word [obstacle_old_y + bx], 25  ; Initialize old position
+.next_row:
+    inc dx
+    jmp .row_loop
     
 .done:
-    pop dx
-    pop bx
-    pop ax
-    ret
-
-
-
-; ------ UPDATE OBSTACLE POSITIONS (move them down) -----
-update_obstacles:
-    push ax
-    push bx
-    push cx
-    
-    xor bx, bx
-.loop:
-    cmp bx, 3
-    jge near .done
-    
-    ; Check if active
-    cmp byte [obstacle_active + bx], 0
-    je near .next
-    
-    ; Get Y position
-    push bx
-    shl bx, 1
-    
-    ; Save old Y
-    mov ax, [obstacle_y + bx]
-    mov [obstacle_old_y + bx], ax
-    
-    ; Move down by 3 pixels
-    add ax, 3
-    
-    ; Check if off screen
-    cmp ax, SCREEN_HEIGHT
-    jl near .keep
-    
-    ; Deactivate this obstacle
-    shr bx, 1
-    mov byte [obstacle_active + bx], 0
-    dec byte [obstacle_count]
-    pop bx
-    jmp near .next
-    
-.keep:
-    mov [obstacle_y + bx], ax
-    pop bx
-    
-.next:
-    inc bx
-    jmp near .loop
-    
-.done:
-    pop cx
-    pop bx
-    pop ax
-    ret
-
-
-
-; ----- DRAW ALL ACTIVE OBSTACLES -----
-draw_obstacles:
-    push ax
-    push bx
-    push cx
-    push dx
-    
-    xor bx, bx
-.loop:
-    cmp bx, 3
-    jge near .done
-    
-    ; Check if active
-    cmp byte [obstacle_active + bx], 0
-    je near .next
-    
-    ; Get position
-    push bx
-    shl bx, 1
-    mov ax, [obstacle_x + bx]
-    mov dx, [obstacle_y + bx]
-    shr bx, 1
-    
-    ; Draw the car
-    push bx
-    mov bx, ax                ; X position
-    call draw_blue_car
-    pop bx
-    
-    pop bx
-    
-.next:
-    inc bx
-    jmp near .loop
-    
-.done:
+    pop es
+    pop di
     pop dx
     pop cx
     pop bx
@@ -1646,347 +2760,75 @@ draw_obstacles:
     ret
 
 
-
-; ----- DRAW BLUE OBSTACLE CAR at BX (X), DX (Y) -----
-draw_blue_car:
+; ----- RESTORE GAME SCREEN (REDRAW EVERYTHING) -----
+restore_game_screen:
     push ax
+    push bx
     push cx
     push dx
-    push si
-    push di
+    push es
     
-    mov si, bx                ; Save X
-    mov di, dx                ; Save Y
+    ; Set ES to video memory
+    mov ax, 0xA000
+    mov es, ax
     
-    ; Check if car is too high (in title area)
-    cmp di, 22
-    jge .start_drawing
-    jmp .done_early
+    ; Redraw the road area that was covered by confirmation box
+    mov dx, 60                ; Start Y
     
-.start_drawing:    
-    ; Row 0 - top (slim)
-    mov cx, 12
-    mov bx, si
-    add bx, 3
-.row0:
-    push cx
-    mov cx, bx
-    mov dx, di
-    cmp dx, 20                ; Skip if in title
-    jle near .skip0
-    mov al, COLOR_BLUE
-    call put_pixel
-.skip0:
-    pop cx
-    inc bx
-    loop .row0
-    inc di
-
-    ; Rows 1-2 - medium
-    mov ax, 2
-.rows1_2:
+.row_loop:
+    cmp dx, 140               ; End Y
+    jge .redraw_objects
+    
+    mov cx, 70                ; Start from left edge of road
+    
+.col_loop:
+    cmp cx, 250               ; End at right edge of road
+    jge .next_row
+    
+    ; Determine color based on position
+    mov al, COLOR_GRAY        ; Default to road
+    
+    ; Check if outside road area
+    cmp cx, ROAD_LEFT
+    jl .make_green
+    cmp cx, ROAD_RIGHT
+    jge .make_green
+    jmp .draw_pixel
+    
+.make_green:
+    mov al, COLOR_GREEN
+    
+.draw_pixel:
+    ; Calculate offset and draw
     push ax
-    mov cx, 14
-    mov bx, si
-    add bx, 2
-.r1_2:
-    push cx
-    mov cx, bx
-    mov dx, di
-    cmp dx, 20
-    jle near .skip1_2
-    mov al, COLOR_BLUE
-    call put_pixel
-.skip1_2:
-    pop cx
-    inc bx
-    loop .r1_2
-    inc di
-    pop ax
-    dec ax
-    jnz near .rows1_2
-
-    ; Rows 3-4 - full width
-    mov ax, 2
-.rows3_4:
-    push ax
-    mov cx, 18
-    mov bx, si
-.r3_4:
-    push cx
-    mov cx, bx
-    mov dx, di
-    cmp dx, 20
-    jle near .skip3_4
-    mov al, COLOR_BLUE
-    call put_pixel
-.skip3_4:
-    pop cx
-    inc bx
-    loop .r3_4
-    inc di
-    pop ax
-    dec ax
-    jnz near .rows3_4
-
-    ; Rows 5-8 - windshield
-    mov ax, 4
-.rows5_8:
-    push ax
-    mov cx, 18
-    mov bx, si
-.r5_8:
-    push cx
-    push bx
-    sub bx, si
-    cmp bx, 3
-    jl short .blue_wind
-    cmp bx, 15
-    jge short .blue_wind
-    mov al, COLOR_BLACK
-    jmp short .draw_wind
-.blue_wind:
-    mov al, COLOR_BLUE
-.draw_wind:
-    pop bx
-    mov cx, bx
-    mov dx, di
-    cmp dx, 20
-    jle short .skip5_8
-    call put_pixel
-.skip5_8:
-    pop cx
-    inc bx
-    loop .r5_8
-    inc di
-    pop ax
-    dec ax
-    jnz near .rows5_8
-
-   ; Rows 9-23 - body 
-mov ax, 15
-.rows9_23_blue:
-    push ax
-    mov cx, 18
-    mov bx, si
-.r9_23_blue_col:
-    push cx
-    mov cx, bx
-    mov dx, di
-    cmp dx, 20
-    jle near .skip9_23_blue
-    mov al, COLOR_BLUE
-    call put_pixel
-.skip9_23_blue:
-    pop cx
-    inc bx
-    loop .r9_23_blue_col
-    inc di
-    pop ax
-    dec ax
-    jnz near .rows9_23_blue
-
-    ; Rows 24-28 - with tires
-    mov ax, 4
-.rows24_28:
-    push ax
-    mov cx, 18
-    mov bx, si
-.r24_28:
-    push cx
-    push bx
-    sub bx, si
-    cmp bx, 4
-    jge near .check_right
-    mov al, COLOR_BLACK
-    jmp near .draw_tire
-.check_right:
-    cmp bx, 14
-    jl near .blue_tire
-    mov al, COLOR_BLACK
-    jmp near .draw_tire
-.blue_tire:
-    mov al, COLOR_BLUE
-.draw_tire:
-    pop bx
-    mov cx, bx
-    mov dx, di
-    cmp dx, 20
-    jle near .skip_tire
-    call put_pixel
-.skip_tire:
-    pop cx
-    inc bx
-    loop .r24_28
-    inc di
-    pop ax
-    dec ax
-    jnz near .rows24_28
-
-.done_early:
-    pop di
-    pop si
+    push dx
+    mov ax, dx
+    mov bx, SCREEN_WIDTH
+    mul bx
+    add ax, cx
+    mov di, ax
     pop dx
-    pop cx
     pop ax
-    ret
-
-
-
-; ----- DRAW RED PLAYER CAR -----
-draw_player_car:
-    push ax
-    push bx
-    push cx
-    push dx
-    push si
-
-    mov bx, PLAYER_X
-    mov si, PLAYER_Y          ; Save starting Y in SI
-    mov dx, PLAYER_Y
+    mov byte [es:di], al
     
-    ; Row 0 - slim top (12 pixels)
-    mov cx, 12
-    push bx
-    add bx, 3
-.row0:
-    push cx
-    mov cx, bx
-    mov al, COLOR_RED
-    call put_pixel
-    pop cx
-    inc bx
-    loop .row0
-    pop bx
+    inc cx
+    jmp .col_loop
+    
+.next_row:
     inc dx
-
-    ; Rows 1-2 - medium (14 pixels)
-    mov di, 2
-.rows1_2:
-    push di
-    mov cx, 14
-    push bx
-    add bx, 2
-.row1_2_col:
-    push cx
-    mov cx, bx
-    mov al, COLOR_RED
-    call put_pixel
-    pop cx
-    inc bx
-    loop .row1_2_col
-    pop bx
-    inc dx
-    pop di
-    dec di
-    jnz .rows1_2
-
-    ; Rows 3-4 - full width (18 pixels)
-    mov di, 2
-.rows3_4:
-    push di
-    mov cx, 18
-    push bx
-.row3_4_col:
-    push cx
-    mov cx, bx
-    mov al, COLOR_RED
-    call put_pixel
-    pop cx
-    inc bx
-    loop .row3_4_col
-    pop bx
-    inc dx
-    pop di
-    dec di
-    jnz .rows3_4
-
-    ; Rows 5-8 - windshield area (body with window)
-    mov di, 4
-.rows5_8:
-    push di
-    mov cx, 18
-    push bx
-.row5_8_col:
-    push cx
-    mov cx, bx
-    push bx
-    sub bx, PLAYER_X          
-    cmp bx, 3
-    jl .red_pixel
-    cmp bx, 15
-    jge .red_pixel
-    mov al, COLOR_BLACK       ; Window
-    jmp .draw_pix
-.red_pixel:
-    mov al, COLOR_RED
-.draw_pix:
-    pop bx
-    call put_pixel
-    pop cx
-    inc bx
-    loop .row5_8_col
-    pop bx
-    inc dx
-    pop di
-    dec di
-    jnz .rows5_8
-
-    ; Rows 9-23 - full body (18 pixels)
-    mov di, 15
-.rows9_23:
-    push di
-    mov cx, 18
-    push bx
-.row9_23_col:
-    push cx
-    mov cx, bx
-    mov al, COLOR_RED
-    call put_pixel
-    pop cx
-    inc bx
-    loop .row9_23_col
-    pop bx
-    inc dx
-    pop di
-    dec di
-    jnz .rows9_23
-
-    ; Rows 24-27 - body with tires (18 pixels)
-    mov di, 4
-.rows24_27:
-    push di
-    mov cx, 18
-    push bx
-.row24_27_col:
-    push cx
-    mov cx, bx
-    push bx
-    sub bx, PLAYER_X
-    cmp bx, 4
-    jge .check_right
-    mov al, COLOR_BLACK       ; Left tire
-    jmp .draw_tire
-.check_right:
-    cmp bx, 14
-    jl .red_tire
-    mov al, COLOR_BLACK       ; Right tire
-    jmp .draw_tire
-.red_tire:
-    mov al, COLOR_RED
-.draw_tire:
-    pop bx
-    call put_pixel
-    pop cx
-    inc bx
-    loop .row24_27_col
-    pop bx
-    inc dx
-    pop di
-    dec di
-    jnz .rows24_27
-
-    pop si
+    jmp .row_loop
+    
+.redraw_objects:
+    ; Redraw lane dividers and borders
+    call draw_lane_dividers
+    call draw_road_borders
+    
+    ; Redraw all active game objects
+    call draw_obstacles
+    call draw_coins
+    call draw_player_car
+    
+    pop es
     pop dx
     pop cx
     pop bx
@@ -1997,226 +2839,6 @@ draw_player_car:
 
 
 ; ==================== UTILITY ROUTINES ====================
-
-; ----- COLLISION DETECTION -----
-check_collisions:
-    push ax
-    push bx
-    push cx
-    push dx
-    push si
-    push di
-
-    ; Player box
-    mov ax, PLAYER_X
-    mov si, ax              ; si = player_x
-    mov ax, PLAYER_Y
-    mov di, ax              ; di = player_y
-
-; --- CHECK OBSTACLE CARS ---
-    xor bx, bx
-check_obs_loop:
-    cmp bx, 3
-    jge check_coins_start
-
-    cmp byte [obstacle_active + bx], 0
-    je next_obs
-
-    ; load obstacle position
-    push bx
-    shl bx, 1
-    mov ax, [obstacle_x + bx]
-    mov dx, [obstacle_y + bx]
-    shr bx, 1
-
-    ; check overlap (simple AABB)
-    ; if NOT (right < left2 OR left > right2 OR bottom < top2 OR top > bottom2)
-    ; then collision
-
-    ; horizontal overlap?
-    mov cx, ax              ; ob_x
-    add cx, 18              ; ob_right
-    cmp cx, si
-    jl next_obs_pop
-
-    mov cx, si              ; player_x
-    add cx, 18
-    cmp cx, ax
-    jl next_obs_pop
-
-    ; vertical overlap?
-    mov cx, dx              ; ob_y
-    add cx, 28
-    cmp cx, di
-    jl next_obs_pop
-
-    mov cx, di
-    add cx, 28
-    cmp cx, dx
-    jl next_obs_pop
-
-    ; ----- COLLISION OCCURRED -----
-    mov byte [obstacle_active + bx], 0
-    dec byte [obstacle_count]
-
-    ; Immediately clear obstacle from screen
-    push bx
-    shl bx, 1
-    mov ax, [obstacle_x + bx]
-    mov dx, [obstacle_y + bx]
-    shr bx, 1
-    mov bx, ax
-    call clear_car_area
-    pop bx
-
-next_obs_pop:
-    pop bx
-next_obs:
-    inc bx
-    jmp check_obs_loop
-
-; --- CHECK COINS ---
-check_coins_start:
-    xor bx, bx
-check_coin_loop:
-    cmp bx, 5
-    jge coll_done
-
-    cmp byte [coin_active + bx], 0
-    je next_coin
-
-    ; load coin center
-    push bx
-    shl bx, 1
-    mov ax, [coin_x + bx]   ; center X
-    mov dx, [coin_y + bx]   ; center Y
-    shr bx, 1
-
-    ; convert to top-left of coin (10x10)
-    sub ax, 5
-    sub dx, 5
-
-    ; --- AABB collision with player size 18x28 ---
-
-    mov cx, ax
-    add cx, 10
-    cmp cx, si
-    jl next_coin_pop
-
-    mov cx, si
-    add cx, 18
-    cmp cx, ax
-    jl next_coin_pop
-
-    mov cx, dx
-    add cx, 10
-    cmp cx, di
-    jl next_coin_pop
-
-    mov cx, di
-    add cx, 28
-    cmp cx, dx
-    jl next_coin_pop
-
-    ; ----- COLLISION OCCURRED -----
-    mov byte [coin_active + bx], 0
-    dec byte [coin_count]
-
-    ; Increase score
-    add word [score], 10
-
-    ; Immediately clear coin from screen
-    push bx
-    shl bx, 1
-    mov ax, [coin_x + bx]
-    mov dx, [coin_y + bx]
-    shr bx, 1
-    mov bx, ax
-    call clear_coin_area
-    pop bx
-
-next_coin_pop:
-    pop bx
-next_coin:
-    inc bx
-    jmp check_coin_loop
-
-coll_done:
-    pop di
-    pop si
-    pop dx
-    pop cx
-    pop bx
-    pop ax
-
-    call draw_player_car
-    ret
-
-
-
-; ----- UPDATE SCORE + FUEL NUMBERS -----
-update_title_numbers:
-    push ax
-    push bx
-    push cx
-    push dx
-
-    ; --- Update SCORE (row 1, col 7) ---
-    mov ah, 0x02      ; set cursor pos
-    mov bh, 0
-    mov dh, 1
-    mov dl, 7
-    int 0x10
-
-    mov ax, [score]
-    call print_number
-
-    ; --- Update FUEL (row 1, col 37) ---
-    mov ah, 0x02
-    mov bh, 0
-    mov dh, 1
-    mov dl, 37
-    int 0x10
-
-    mov ax, [fuel]
-    call print_number
-
-    pop dx
-    pop cx
-    pop bx
-    pop ax
-    ret
-
-
-
-; ----- RANDOM BYTE -----
-get_random_byte:
-    push dx
-    xor ah, ah
-    int 0x1A
-    mov al, dl
-    and al, 0x7F
-    pop dx
-    ret
-
-animation_delay:
-    push bx
-    push cx
-    
-    mov bx, 3
-.outer:
-    mov cx, 0xFFFF
-.inner:
-    nop
-    loop .inner
-    dec bx
-    jnz near .outer
-    
-    pop cx
-    pop bx
-    ret
-
-
 
 ; ----- DRAWING PIXELS -----
 ; Pixel at (CX, DX) with color AL
@@ -2229,11 +2851,11 @@ put_pixel:
     push di
 
     cmp cx, SCREEN_WIDTH
-    jge near .skip
+    jge   .skip
     cmp dx, SCREEN_HEIGHT
-    jge near .skip
+    jge   .skip
     cmp dx, 0
-    jl near .skip
+    jl   .skip
 
     push ax
     mov ax, dx
@@ -2251,7 +2873,6 @@ put_pixel:
     pop bx
     pop ax
     ret
-
 
 
 ; ----- NUMBER PRINTING -----
@@ -2299,4 +2920,34 @@ print_number:
     pop cx
     pop bx
     pop ax
+    ret
+
+
+; ----- RANDOM BYTE -----
+get_random_byte:
+    push dx
+    xor ah, ah
+    int 0x1A
+    mov al, dl
+    and al, 0x7F
+    pop dx
+    ret
+
+
+; ----- ANIMATION DELAY -----
+animation_delay:
+    push bx
+    push cx
+    
+    mov bx, DELAY_OUTER_LOOP
+.outer:
+    mov cx, DELAY_INNER_LOOP
+.inner:
+    nop
+    loop .inner
+    dec bx
+    jnz   .outer
+    
+    pop cx
+    pop bx
     ret
