@@ -1,4 +1,5 @@
-[org 0x0100]         
+[org 0x0100] 
+[bits 16]         
 
 jmp start
 
@@ -18,6 +19,19 @@ COLOR_GRAY            equ 8
 COLOR_YELLOW          equ 14
 COLOR_WHITE           equ 15
 COLOR_ORANGE          equ 65
+COLOR_DARK_BLUE     equ 1       ; Dark Blue
+COLOR_DARK_CYAN     equ 3       ; Dark Cyan
+COLOR_BRIGHT_RED    equ 4       ; Bright Red
+COLOR_LIGHT_GRAY    equ 7       ; Light Gray
+COLOR_DARK_GRAY     equ 8       ; Dark Gray
+COLOR_WINDSHIELD    equ 8       ; Windshield color
+COLOR_BRIGHT_GREEN  equ 10      ; Bright Green
+COLOR_BRIGHT_YELLOW equ 14      ; Bright Yellow
+COLOR_DARK_RED      equ 32      ; Dark Red
+COLOR_WINDSHIELD_TOP equ 56     ; Windshield top
+COLOR_LIGHT_RED     equ 68      ; Light Red
+COLOR_GRILL_GRAY    equ 7       ; Grill gray
+COLOR_MEDIUM_GRAY   equ 7       ; Medium gray
 
 ; Screen dimensions
 SCREEN_WIDTH    equ 320
@@ -108,6 +122,51 @@ saved_road_area times 4800 db 0  ; Buffer to save screen area (80x60 pixels)
 confirm_msg1:   db 'Do you want to quit?', 0
 confirm_msg2:   db 'Press Y or N', 0
 
+; Car drawing variables
+startX  dw 0
+startY  dw 0
+color   db 0
+
+; Main screen strings
+STR_MAIN_TITLE:     db "FAISAL TOWN TRAFFIC", 0
+STR_DEVELOPER:      db "ZOHA SARWAR (24L-0536)", 0
+STR_ROLL:           db "ABDULLAH OMAR (24L-0576)", 0
+STR_MAIN_INSTRUCTION: db "ENGAGE DRIVE / PRESS START KEY", 0
+
+; Instruction screen strings
+STR_INST_TITLE:     db "INSTRUCTIONS", 0
+STR_INST_1:         db "Arrow Keys: Move car", 0
+STR_INST_2:         db "ESC: Pause & Quit Menu", 0
+STR_INST_3:         db "Y: Quit (when paused)", 0
+STR_INST_4:         db "N or ESC: Resume game", 0
+STR_INST_5:         db "Collect fuel cans!", 0
+STR_INST_6:         db "Game ends if fuel runs out", 0
+STR_INST_7:         db "Press any key...", 0
+
+; Registration screen strings
+STR_REG_TITLE:      db "FINAL EXAM", 0
+STR_ROLL_PROMPT:    db "Roll Num: ", 0
+STR_NAME_PROMPT:    db "Name: ", 0
+STR_TIME:           db "Time: 3 hours", 0
+STR_INSTRUCTOR:     db "Instructor: Zummar Saad", 0
+STR_TA:             db "TA: Abdul Moeed Maan", 0
+STR_START:          db "ANDDD YOUR RACE STARTS NOW!!!(press P)", 0
+STR_STARTING:       db "STARTING...", 0
+
+; Input buffers
+player_roll:        times 21 db 0
+player_name:        times 21 db 0
+
+; End screen strings 
+STR_TITLE:          db "GAME OVER", 0
+STR_HEADING:        db "DISCIPLINARY ACTION NOTICE", 0
+STR_NOTICE1:        db "Action taken for 'low fuel'", 0
+STR_NOTICE2:        db "against the student below:", 0
+STR_STUDENT:        db "ROLLNUM NAME", 0
+STR_POINTS:         db "POINTS: 0000", 0
+STR_INSTRUCTION1:   db "ENTER:Menu  SPACE:Restart", 0
+STR_INSTRUCTION2:   db "ESC:Exit", 0
+
 
 
 
@@ -117,6 +176,10 @@ start:
     ; Set video mode to 13h (320x200, 256 colors)
     mov ax, 0x0013
     int 0x10
+
+    call start_screen_layout
+    call show_instructions
+    call show_registration
 
     ; Set ES to video memory segment
     mov ax, 0xA000
@@ -180,7 +243,529 @@ exit_program:
 
 
 
+
+; ==================== GAME SCREENS ====================
+
+; ----- Main Screen with Car -----
+start_screen_layout:
+    ; Fill entire screen with DARK_BLUE
+    mov bx, 0
+    mov cx, 0
+    mov dx, 320
+    mov si, 200
+    mov al, COLOR_DARK_BLUE
+    call fill_rect
+    
+    ; Draw Outer Border
+    mov bx, 0
+    mov cx, 0
+    mov dx, 320
+    mov si, 2
+    mov al, COLOR_BRIGHT_YELLOW
+    call fill_rect
+    
+    mov bx, 0
+    mov cx, 198
+    mov dx, 320
+    mov si, 2
+    mov al, COLOR_BRIGHT_YELLOW
+    call fill_rect
+    
+    mov bx, 0
+    mov cx, 2
+    mov dx, 2
+    mov si, 196
+    mov al, COLOR_BRIGHT_YELLOW
+    call fill_rect
+    
+    mov bx, 318
+    mov cx, 2
+    mov dx, 2
+    mov si, 196
+    mov al, COLOR_BRIGHT_YELLOW
+    call fill_rect
+    
+    ; Top Dashboard Panel
+    mov bx, 5
+    mov cx, 5
+    mov dx, 310
+    mov si, 25
+    mov al, COLOR_DARK_GRAY
+    call fill_rect
+    
+    ; Central Display Panel
+    mov bx, 30
+    mov cx, 40
+    mov dx, 260
+    mov si, 120
+    mov al, COLOR_DARK_CYAN
+    call fill_rect
+    
+    ; Instruction Panel
+    mov bx, 5
+    mov cx, 175
+    mov dx, 310
+    mov si, 20
+    mov al, COLOR_BRIGHT_RED
+    call fill_rect
+    
+    ; Draw the Car
+    call draw_car
+    
+    ; Title
+    mov bx, 8
+    mov cx, 10
+    mov si, STR_MAIN_TITLE
+    mov al, COLOR_WHITE
+    call print_string_gfx_2x
+    
+    ; Developer info
+    mov bx, 72
+    mov cx, 135
+    mov si, STR_DEVELOPER
+    mov al, COLOR_WHITE
+    call print_string_gfx
+    
+    ; Roll numbers
+    mov bx, 64
+    mov cx, 145
+    mov si, STR_ROLL
+    mov al, COLOR_WHITE
+    call print_string_gfx
+    
+    ; Instruction text
+    mov bx, 36
+    mov cx, 180
+    mov si, STR_MAIN_INSTRUCTION
+    mov al, COLOR_WHITE
+    call print_string_gfx
+    
+    ; Wait for User Input
+    call wait_for_key
+    ret
+
+
+; ----- Show Instructions Screen -----
+show_instructions:
+    ; Clear the cyan panel only
+    mov bx, 30
+    mov cx, 40
+    mov dx, 260
+    mov si, 120
+    mov al, COLOR_DARK_CYAN
+    call fill_rect
+    
+    ; Title
+    mov bx, 100
+    mov cx, 45
+    mov si, STR_INST_TITLE
+    mov al, COLOR_BRIGHT_YELLOW
+    call print_string_gfx
+    
+    ; Instructions
+    mov bx, 35
+    mov cx, 60
+    mov si, STR_INST_1
+    mov al, COLOR_WHITE
+    call print_string_gfx
+    
+    mov bx, 35
+    mov cx, 72
+    mov si, STR_INST_2
+    mov al, COLOR_WHITE
+    call print_string_gfx
+    
+    mov bx, 35
+    mov cx, 84
+    mov si, STR_INST_3
+    mov al, COLOR_WHITE
+    call print_string_gfx
+    
+    mov bx, 35
+    mov cx, 96
+    mov si, STR_INST_4
+    mov al, COLOR_WHITE
+    call print_string_gfx
+    
+    mov bx, 35
+    mov cx, 108
+    mov si, STR_INST_5
+    mov al, COLOR_BRIGHT_GREEN
+    call print_string_gfx
+    
+    mov bx, 35
+    mov cx, 120
+    mov si, STR_INST_6
+    mov al, COLOR_BRIGHT_GREEN
+    call print_string_gfx
+    
+    mov bx, 35
+    mov cx, 135
+    mov si, STR_INST_7
+    mov al, COLOR_BRIGHT_YELLOW
+    call print_string_gfx
+    
+    ; Wait for key
+    call wait_for_key
+    ret
+
+
+; ----- Show Registration Screen -----
+show_registration:
+    ; Clear entire screen
+    mov bx, 0
+    mov cx, 0
+    mov dx, 320
+    mov si, 200
+    mov al, COLOR_DARK_BLUE
+    call fill_rect
+    
+    ; Draw borders
+    mov bx, 0
+    mov cx, 0
+    mov dx, 320
+    mov si, 2
+    mov al, COLOR_BRIGHT_YELLOW
+    call fill_rect
+    
+    mov bx, 0
+    mov cx, 198
+    mov dx, 320
+    mov si, 2
+    mov al, COLOR_BRIGHT_YELLOW
+    call fill_rect
+    
+    mov bx, 0
+    mov cx, 2
+    mov dx, 2
+    mov si, 196
+    mov al, COLOR_BRIGHT_YELLOW
+    call fill_rect
+    
+    mov bx, 318
+    mov cx, 2
+    mov dx, 2
+    mov si, 196
+    mov al, COLOR_BRIGHT_YELLOW
+    call fill_rect
+    
+    ; Top panel
+    mov bx, 5
+    mov cx, 5
+    mov dx, 310
+    mov si, 25
+    mov al, COLOR_BRIGHT_RED
+    call fill_rect
+    
+    ; Central panel
+    mov bx, 30
+    mov cx, 40
+    mov dx, 260
+    mov si, 120
+    mov al, COLOR_DARK_CYAN
+    call fill_rect
+    
+    ; Bottom panel
+    mov bx, 5
+    mov cx, 175
+    mov dx, 310
+    mov si, 20
+    mov al, COLOR_DARK_GRAY
+    call fill_rect
+    
+    ; Title
+    mov bx, 80
+    mov cx, 10
+    mov si, STR_REG_TITLE
+    mov al, COLOR_WHITE
+    call print_string_gfx_2x
+    
+    ; Roll Number box 
+    mov bx, 45
+    mov cx, 58
+    mov dx, 230 
+    mov si, 20  
+    mov al, COLOR_BRIGHT_YELLOW
+    call fill_rect
+    
+    mov bx, 47
+    mov cx, 60
+    mov dx, 226  
+    mov si, 16   
+    mov al, COLOR_DARK_GRAY
+    call fill_rect
+    
+    mov bx, 50
+    mov cx, 65
+    mov si, STR_ROLL_PROMPT
+    mov al, COLOR_WHITE
+    call print_string_gfx
+    
+    ; Name box
+    mov bx, 45
+    mov cx, 93
+    mov dx, 230
+    mov si, 20
+    mov al, COLOR_BRIGHT_YELLOW
+    call fill_rect
+    
+    mov bx, 47
+    mov cx, 95
+    mov dx, 226
+    mov si, 16
+    mov al, COLOR_DARK_GRAY
+    call fill_rect
+    
+    mov bx, 50
+    mov cx, 100
+    mov si, STR_NAME_PROMPT
+    mov al, COLOR_WHITE
+    call print_string_gfx
+    
+    ; Time
+    mov bx, 180
+    mov cx, 45
+    mov si, STR_TIME
+    mov al, COLOR_BRIGHT_GREEN
+    call print_string_gfx
+    
+    ; Instructor
+    mov bx, 35
+    mov cx, 135
+    mov si, STR_INSTRUCTOR
+    mov al, COLOR_WHITE
+    call print_string_gfx
+    
+    ; TA
+    mov bx, 35
+    mov cx, 145
+    mov si, STR_TA
+    mov al, COLOR_WHITE
+    call print_string_gfx
+    
+    ; Start instruction
+    mov bx, 10
+    mov cx, 180
+    mov si, STR_START
+    mov al, COLOR_WHITE
+    call print_string_gfx
+    
+    ; Get Roll Number Input
+    mov bx, 130
+    mov cx, 65
+    mov si, player_roll
+    call get_string_input
+    
+    cmp byte [player_roll], 0
+    je .exit_reg
+    
+    ; Get Name Input
+    mov bx, 110
+    mov cx, 100
+    mov si, player_name
+    call get_string_input
+    
+    cmp byte [player_name], 0
+    je .exit_reg
+    
+    ; Wait for 'P' key
+.wait_for_p:
+    mov ah, 0x00
+    int 0x16
+    
+    cmp al, 'p'
+    je .start_game
+    cmp al, 'P'
+    je .start_game
+    jmp .wait_for_p
+    
+.start_game:
+    call show_game_start
+    
+.exit_reg:
+    ret
+
+
+; ----- Show Game Start Message -----
+show_game_start:
+    mov bx, 30
+    mov cx, 40
+    mov dx, 260
+    mov si, 120
+    mov al, COLOR_DARK_CYAN
+    call fill_rect
+    
+    mov bx, 90
+    mov cx, 90
+    mov si, STR_STARTING
+    mov al, COLOR_BRIGHT_GREEN
+    call print_string_gfx_2x
+    
+    mov cx, 0xFFFF
+.delay_loop:
+    loop .delay_loop
+    
+    ret
+
+
+; ----- End Screen Layout Logic - Game Over Screen -----
+end_screen_layout:
+
+    ; 1. Fill entire screen with DARK_BLUE
+    mov bx, 0                   ; X = 0
+    mov cx, 0                   ; Y = 0
+    mov dx, 320                 ; Width = 320 (full screen)
+    mov si, 200                 ; Height = 200 (full screen)
+    mov al, COLOR_DARK_BLUE     ; Background color
+    call fill_rect
+    
+    ; 2. Draw Outer Border (2-pixel thick)
+    ; Top border (2 pixels high)
+    mov bx, 0                   ; X = 0
+    mov cx, 0                   ; Y = 0
+    mov dx, 320                 ; Width = 320
+    mov si, 2                   ; Height = 2
+    mov al, COLOR_BRIGHT_YELLOW ; Border color
+    call fill_rect
+    
+    ; Bottom border (2 pixels high)
+    mov bx, 0                   ; X = 0
+    mov cx, 198                 ; Y = 198
+    mov dx, 320                 ; Width = 320
+    mov si, 2                   ; Height = 2
+    mov al, COLOR_BRIGHT_YELLOW
+    call fill_rect
+    
+    ; Left border (2 pixels wide)
+    mov bx, 0                   ; X = 0
+    mov cx, 2                   ; Y = 2
+    mov dx, 2                   ; Width = 2
+    mov si, 196                 ; Height = 196
+    mov al, COLOR_BRIGHT_YELLOW
+    call fill_rect
+    
+    ; Right border (2 pixels wide)
+    mov bx, 318                 ; X = 318
+    mov cx, 2                   ; Y = 2
+    mov dx, 2                   ; Width = 2
+    mov si, 196                 ; Height = 196
+    mov al, COLOR_BRIGHT_YELLOW
+    call fill_rect
+    
+    ; 3. Top Dashboard Panel 
+    mov bx, 5                   ; X = 5
+    mov cx, 5                   ; Y = 5
+    mov dx, 310                 ; Width = 310 (320 - 10)
+    mov si, 25                  ; Height = 25 (Y=5 to Y=30)
+    mov al, COLOR_BRIGHT_RED
+    call fill_rect
+    
+    ; 4. Central Display Panel (DARK_CYAN)
+    mov bx, 30                  ; X = 30
+    mov cx, 40                  ; Y = 40
+    mov dx, 260                 ; Width = 260
+    mov si, 110                 ; Height = 110 (reduced from 120)
+    mov al, COLOR_DARK_CYAN
+    call fill_rect
+    
+    ; 5. Instruction Panel COLOR_DARK_GRAY
+    mov bx, 5                   ; X = 5
+    mov cx, 165                 ; Y = 165 (moved up from 175)
+    mov dx, 310                 ; Width = 310 (320 - 10)
+    mov si, 30                  ; Height = 30 (increased from 20)
+    mov al, COLOR_DARK_GRAY
+    call fill_rect
+
+    ; 6. Display Text in Graphics Mode    
+    ; Title "GAME OVER" in top dashboard (2x size, centered)
+    ; "GAME OVER" = 9 chars * 16 pixels = 144 pixels
+    ; Center: (320 - 144) / 2 = 88
+    mov bx, 88                  ; X = 88 pixels (centered)
+    mov cx, 10                  ; Y = 10 pixels
+    mov si, STR_TITLE           ; String pointer
+    mov al, COLOR_WHITE         ; White text
+    call print_string_gfx_2x
+    
+    ; Heading "DISCIPLINARY ACTION NOTICE" (normal size, centered)
+    ; 26 chars * 8 pixels = 208 pixels
+    ; Center: (260 - 208) / 2 + 30 = 56
+    mov bx, 56                  ; X = 56 pixels (centered in cyan panel)
+    mov cx, 48                  ; Y = 48 pixels
+    mov si, STR_HEADING         ; String pointer
+    mov al, COLOR_BRIGHT_YELLOW ; Yellow heading
+    call print_string_gfx
+    
+    ; Notice text line 1 (normal size, centered)
+    ; "Action taken for 'low fuel'" = 29 chars * 8 = 232 pixels
+    ; Center: (260 - 232) / 2 + 30 = 44
+    mov bx, 44                  ; X = 44 pixels (centered)
+    mov cx, 65                  ; Y = 65 pixels
+    mov si, STR_NOTICE1         ; String pointer
+    mov al, COLOR_WHITE         ; White text
+    call print_string_gfx
+    
+    ; Notice text line 2 (normal size, centered)
+    ; "against the student below:" = 27 chars * 8 = 216 pixels
+    ; Center: (260 - 216) / 2 + 30 = 52
+    mov bx, 52                  ; X = 52 pixels (centered)
+    mov cx, 78                  ; Y = 78 pixels
+    mov si, STR_NOTICE2         ; String pointer
+    mov al, COLOR_WHITE         ; White text
+    call print_string_gfx
+    
+    ; Student info (normal size, centered)
+    ; "ROLLNUM NAME" = 12 chars * 8 = 96 pixels
+    ; Center: (260 - 96) / 2 + 30 = 112
+    mov bx, 112                 ; X = 112 pixels (centered)
+    mov cx, 105                 ; Y = 105 pixels
+    mov si, STR_STUDENT         ; String pointer
+    mov al, COLOR_WHITE         ; White text
+    call print_string_gfx
+    
+    ; Points (normal size, centered as one line)
+    ; "POINTS: 0000" = 12 chars * 8 = 96 pixels
+    ; Center: (260 - 96) / 2 + 30 = 112
+    mov bx, 112                 ; X = 112 pixels (centered)
+    mov cx, 130                 ; Y = 130 pixels
+    mov si, STR_POINTS          ; String pointer
+    mov al, COLOR_BRIGHT_GREEN  ; Green text
+    call print_string_gfx
+    
+    ; Instruction text - LINE 1 (centered in red panel)
+    ; "ENTER:Menu  SPACE:Restart" = 25 chars * 8 = 200 pixels
+    ; Center: (310 - 200) / 2 + 5 = 60
+    mov bx, 60                  ; X = 60 pixels (centered)
+    mov cx, 170                 ; Y = 170 pixels (top line)
+    mov si, STR_INSTRUCTION1    ; String pointer
+    mov al, COLOR_WHITE         ; White text
+    call print_string_gfx
+    
+    ; Instruction text - LINE 2 (centered in red panel)
+    ; "ESC:Exit" = 8 chars * 8 = 64 pixels
+    ; Center: (310 - 64) / 2 + 5 = 128
+    mov bx, 128                 ; X = 128 pixels (centered)
+    mov cx, 182                 ; Y = 182 pixels (bottom line, more space)
+    mov si, STR_INSTRUCTION2    ; String pointer
+    mov al, COLOR_WHITE         ; White text
+    call print_string_gfx
+    
+    ; 7. Wait for User Input
+    call wait_for_key
+    
+    ; 8. Cleanup and Exit
+    call exit_program
+
+
+
+
 ; ==================== CONTROLLER FUNCTIONS ====================
+
+; ----- Wait for Key Press -----
+wait_for_key:
+    mov ah, 0x00
+    int 0x16
+    ret
+
 
 ; ----- WAIT FOR ANY KEY PRESS TO START GAME -----
 wait_for_start_key:
@@ -271,7 +856,7 @@ check_keyboard:
 .quit_yes:
     ; User confirmed quit
     call restore_game_screen
-    jmp exit_program
+    jmp end_screen_layout
     
 .quit_no:
     ; User canceled quit - resume game
@@ -1496,6 +2081,282 @@ draw_player_car:
 
     pop di
     pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+
+; ----- DRAW CAR ON MAIN SCREEN -----
+draw_car:
+    push ax
+    push bx
+    push cx
+    push dx
+
+    mov word [startX], 125
+    mov word [startY], 55
+
+    ; Windshield (top dark part) - 40x8 pixels
+    mov bx, [startX]
+    add bx, 15
+    mov dx, [startY]
+    add dx, 5
+    mov cx, 40
+    mov ax, 8
+    mov byte [color], COLOR_WINDSHIELD_TOP
+    call draw_rect
+
+    ; Windshield (main part) - 46x15 pixels
+    mov bx, [startX]
+    add bx, 12
+    mov dx, [startY]
+    add dx, 13
+    mov cx, 46
+    mov ax, 15
+    mov byte [color], COLOR_WINDSHIELD
+    call draw_rect
+
+    ; Hood (top red part) - 54x6 pixels
+    mov bx, [startX]
+    add bx, 8
+    mov dx, [startY]
+    add dx, 28
+    mov cx, 54
+    mov ax, 6
+    mov byte [color], COLOR_DARK_RED
+    call draw_rect
+
+    ; Main body - 60x18 pixels
+    mov bx, [startX]
+    add bx, 5
+    mov dx, [startY]
+    add dx, 34
+    mov cx, 60
+    mov ax, 18
+    mov byte [color], COLOR_RED
+    call draw_rect
+
+    ; Side mirror (left) - 5x6 pixels
+    mov bx, [startX]
+    mov dx, [startY]
+    add dx, 38
+    mov cx, 5
+    mov ax, 6
+    mov byte [color], COLOR_RED
+    call draw_rect
+
+    ; Side mirror (right) - 5x6 pixels
+    mov bx, [startX]
+    add bx, 65
+    mov dx, [startY]
+    add dx, 38
+    mov cx, 5
+    mov ax, 6
+    mov byte [color], COLOR_RED
+    call draw_rect
+
+    ; Headlight (left outer) - 12x6 pixels
+    mov bx, [startX]
+    add bx, 8
+    mov dx, [startY]
+    add dx, 42
+    mov cx, 12
+    mov ax, 6
+    mov byte [color], COLOR_WHITE
+    call draw_rect
+
+    ; Headlight (left inner) - 10x4 pixels
+    mov bx, [startX]
+    add bx, 9
+    mov dx, [startY]
+    add dx, 43
+    mov cx, 10
+    mov ax, 4
+    mov byte [color], COLOR_LIGHT_GRAY
+    call draw_rect
+
+    ; Headlight (right outer) - 12x6 pixels
+    mov bx, [startX]
+    add bx, 50
+    mov dx, [startY]
+    add dx, 42
+    mov cx, 12
+    mov ax, 6
+    mov byte [color], COLOR_WHITE
+    call draw_rect
+
+    ; Headlight (right inner) - 10x4 pixels
+    mov bx, [startX]
+    add bx, 51
+    mov dx, [startY]
+    add dx, 43
+    mov cx, 10
+    mov ax, 4
+    mov byte [color], COLOR_LIGHT_GRAY
+    call draw_rect
+
+    ; Front grille - 22x8 pixels
+    mov bx, [startX]
+    add bx, 24
+    mov dx, [startY]
+    add dx, 42
+    mov cx, 22
+    mov ax, 8
+    mov byte [color], COLOR_BLACK
+    call draw_rect
+
+    ; Grille detail line 1
+    mov bx, [startX]
+    add bx, 25
+    mov dx, [startY]
+    add dx, 43
+    mov cx, 20
+    mov ax, 1
+    mov byte [color], COLOR_GRILL_GRAY
+    call draw_rect
+
+    ; Grille detail line 2
+    mov bx, [startX]
+    add bx, 25
+    mov dx, [startY]
+    add dx, 45
+    mov cx, 20
+    mov ax, 1
+    mov byte [color], COLOR_GRILL_GRAY
+    call draw_rect
+
+    ; Grille detail line 3
+    mov bx, [startX]
+    add bx, 25
+    mov dx, [startY]
+    add dx, 47
+    mov cx, 20
+    mov ax, 1
+    mov byte [color], COLOR_GRILL_GRAY
+    call draw_rect
+
+    ; License plate area - 14x3 pixels
+    mov bx, [startX]
+    add bx, 28
+    mov dx, [startY]
+    add dx, 51
+    mov cx, 14
+    mov ax, 3
+    mov byte [color], COLOR_BLACK
+    call draw_rect
+
+    ; Bumper - 54x3 pixels
+    mov bx, [startX]
+    add bx, 8
+    mov dx, [startY]
+    add dx, 52
+    mov cx, 54
+    mov ax, 3
+    mov byte [color], COLOR_DARK_RED
+    call draw_rect
+
+    ; Wheel (left) - 12x8 pixels
+    mov bx, [startX]
+    add bx, 8
+    mov dx, [startY]
+    add dx, 55
+    mov cx, 12
+    mov ax, 8
+    mov byte [color], COLOR_BLACK
+    call draw_rect
+
+    ; Wheel center (left) - 8x4 pixels
+    mov bx, [startX]
+    add bx, 10
+    mov dx, [startY]
+    add dx, 57
+    mov cx, 8
+    mov ax, 4
+    mov byte [color], COLOR_DARK_GRAY
+    call draw_rect
+
+    ; Wheel (right) - 12x8 pixels
+    mov bx, [startX]
+    add bx, 50
+    mov dx, [startY]
+    add dx, 55
+    mov cx, 12
+    mov ax, 8
+    mov byte [color], COLOR_BLACK
+    call draw_rect
+
+    ; Wheel center (right) - 8x4 pixels
+    mov bx, [startX]
+    add bx, 52
+    mov dx, [startY]
+    add dx, 57
+    mov cx, 8
+    mov ax, 4
+    mov byte [color], COLOR_DARK_GRAY
+    call draw_rect
+
+    ; Wheel well shadow (left) - 3x4 pixels
+    mov bx, [startX]
+    add bx, 5
+    mov dx, [startY]
+    add dx, 54
+    mov cx, 3
+    mov ax, 4
+    mov byte [color], COLOR_BLACK
+    call draw_rect
+
+    ; Wheel well shadow (right) - 3x4 pixels
+    mov bx, [startX]
+    add bx, 62
+    mov dx, [startY]
+    add dx, 54
+    mov cx, 3
+    mov ax, 4
+    mov byte [color], COLOR_BLACK
+    call draw_rect
+
+    ; Body shine/highlight (left) - 25x2 pixels
+    mov bx, [startX]
+    add bx, 10
+    mov dx, [startY]
+    add dx, 36
+    mov cx, 25
+    mov ax, 2
+    mov byte [color], COLOR_LIGHT_RED
+    call draw_rect
+
+    ; Body shine/highlight (right) - 15x2 pixels
+    mov bx, [startX]
+    add bx, 45
+    mov dx, [startY]
+    add dx, 36
+    mov cx, 15
+    mov ax, 2
+    mov byte [color], COLOR_LIGHT_RED
+    call draw_rect
+
+    ; Windshield reflection (left) - 8x2 pixels
+    mov bx, [startX]
+    add bx, 14
+    mov dx, [startY]
+    add dx, 15
+    mov cx, 8
+    mov ax, 2
+    mov byte [color], COLOR_WINDSHIELD_TOP
+    call draw_rect
+
+    ; Windshield reflection (right) - 8x2 pixels
+    mov bx, [startX]
+    add bx, 48
+    mov dx, [startY]
+    add dx, 15
+    mov cx, 8
+    mov ax, 2
+    mov byte [color], COLOR_WINDSHIELD_TOP
+    call draw_rect
+
     pop dx
     pop cx
     pop bx
@@ -2840,41 +3701,6 @@ restore_game_screen:
 
 ; ==================== UTILITY ROUTINES ====================
 
-; ----- DRAWING PIXELS -----
-; Pixel at (CX, DX) with color AL
-; Video memory at A000:0000, offset = Y * 320 + X
-put_pixel:
-    push ax
-    push bx
-    push cx
-    push dx
-    push di
-
-    cmp cx, SCREEN_WIDTH
-    jge   .skip
-    cmp dx, SCREEN_HEIGHT
-    jge   .skip
-    cmp dx, 0
-    jl   .skip
-
-    push ax
-    mov ax, dx
-    mov bx, SCREEN_WIDTH
-    mul bx
-    add ax, cx
-    mov di, ax
-    pop ax
-    mov byte [es:di], al
-
-.skip:
-    pop di
-    pop dx
-    pop cx
-    pop bx
-    pop ax
-    ret
-
-
 ; ----- NUMBER PRINTING -----
 ; Print number in AX as decimal
 ; Uses BIOS teletype output
@@ -2951,3 +3777,607 @@ animation_delay:
     pop cx
     pop bx
     ret
+
+
+; ----- DRAWING PIXELS -----
+; Pixel at (CX, DX) with color AL
+; Video memory at A000:0000, offset = Y * 320 + X
+put_pixel:
+    push ax
+    push bx
+    push cx
+    push dx
+    push di
+
+    cmp cx, SCREEN_WIDTH
+    jge   .skip
+    cmp dx, SCREEN_HEIGHT
+    jge   .skip
+    cmp dx, 0
+    jl   .skip
+
+    push ax
+    mov ax, dx
+    mov bx, SCREEN_WIDTH
+    mul bx
+    add ax, cx
+    mov di, ax
+    pop ax
+    mov byte [es:di], al
+
+.skip:
+    pop di
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+
+; ----- PUT PIXEL V2 FOR SCREENS -----
+put_pixel_2:
+    push ax
+    push bx
+    push cx
+    push dx
+    push di
+
+    ; Check bounds
+    cmp cx, 320
+    jge .skip
+    cmp dx, 200
+    jge .skip
+
+    ; Set ES to video memory segment
+    push ax
+    mov ax, 0xA000
+    mov es, ax
+    pop ax
+
+    ; Calculate offset: DI = (Y * 320) + X
+    push ax
+    mov ax, dx
+    mov bx, 320
+    mul bx
+    add ax, cx
+    mov di, ax
+    pop ax
+
+    ; Write pixel
+    mov byte [es:di], al
+
+.skip:
+    pop di
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+
+; ----- Draw pixel -----
+draw_pixel:
+    push ax                     ; Save color value
+    push bx                     ; Save registers
+    
+    ; Calculate offset: Y * 320 + X
+    mov ax, cx                  ; AX = Y
+    mov di, 320                 ; DI = screen width
+    mul di                      ; DX:AX = Y * 320
+    add ax, bx                  ; AX = Y * 320 + X
+    mov di, ax                  ; DI = offset into video memory
+    
+    ; Set ES to video memory segment
+    mov ax, 0xA000              ; Video memory segment for Mode 13h
+    mov es, ax
+    
+    pop bx                      ; Restore registers
+    pop ax                      ; Restore color
+    
+    ; Write pixel to video memory
+    stosb                       ; ES:[DI] = AL, increment DI
+    
+    ret
+
+
+; --------------- DRAW CHARACTER ---------------
+; ----- Draw Single Character (normal 8x8) -----
+draw_char_gfx:
+    pusha
+    push es
+    push ds
+    
+    xor ah, ah
+    shl ax, 3
+    mov si, ax
+    
+    push 0xF000
+    pop ds
+    add si, 0xFA6E
+    
+    push 0xA000
+    pop es
+    
+    push bx
+    push cx
+    
+    mov dh, 8
+    
+.row_loop:
+    mov ax, cx
+    push dx
+    mov dx, 320
+    mul dx
+    pop dx
+    add ax, bx
+    mov di, ax
+    
+    mov al, [ds:si]
+    inc si
+    mov ah, al
+    
+    mov ch, 8
+    
+.pixel_loop:
+    test ah, 0x80
+    jz .skip_pixel
+    
+    mov al, dl
+    mov [es:di], al
+    
+.skip_pixel:
+    inc di
+    shl ah, 1
+    dec ch
+    jnz .pixel_loop
+    
+    inc cx
+    dec dh
+    jnz .row_loop
+    
+    pop cx
+    pop bx
+    
+    pop ds
+    pop es
+    popa
+    ret
+
+
+; ----- Draw Single Character (16x16, 2x scaled) -----
+draw_char_gfx_2x:
+    pusha
+    push es
+    push ds
+    
+    xor ah, ah
+    shl ax, 3
+    mov si, ax
+    
+    push 0xF000
+    pop ds
+    add si, 0xFA6E
+    
+    push 0xA000
+    pop es
+    
+    push bx
+    push cx
+    
+    mov dh, 8
+    
+.row_loop:
+    mov al, [ds:si]
+    inc si
+    
+    push cx
+    mov byte [bp-1], al
+    
+    call .draw_scaled_row
+    
+    inc cx
+    mov al, [bp-1]
+    call .draw_scaled_row
+    
+    pop cx
+    add cx, 2
+    
+    dec dh
+    jnz .row_loop
+    
+    pop cx
+    pop bx
+    
+    pop ds
+    pop es
+    popa
+    ret
+
+.draw_scaled_row:
+    push ax
+    mov ax, cx
+    push dx
+    mov dx, 320
+    mul dx
+    pop dx
+    add ax, bx
+    mov di, ax
+    pop ax
+    
+    mov ah, al
+    
+    mov ch, 8
+    
+.pixel_loop_2x:
+    test ah, 0x80
+    jz .skip_pixel_2x
+    
+    mov al, dl
+    mov [es:di], al
+    mov [es:di+1], al
+    
+.skip_pixel_2x:
+    add di, 2
+    shl ah, 1
+    dec ch
+    jnz .pixel_loop_2x
+    
+    ret
+
+
+; ----- Draw Single Character (4x4, 0.5x scaled) -----
+draw_char_gfx_half:
+    pusha
+    push es
+    push ds
+    
+    ; Get font data from ROM BIOS
+    xor ah, ah                  ; AX = character code
+    shl ax, 3                   ; Multiply by 8 (each char is 8 bytes)
+    mov si, ax                  ; SI = offset into font
+    
+    ; Point DS to font ROM
+    push 0xF000
+    pop ds
+    add si, 0xFA6E              ; Font data starts at F000:FA6E
+    
+    ; Point ES to video memory
+    push 0xA000
+    pop es
+    
+    ; Save starting position
+    push bx                     ; Save X
+    push cx                     ; Save Y
+    
+    ; Draw 4 rows (sample every other row from 8)
+    mov dh, 4                   ; Row counter
+    
+.row_loop:
+    ; Calculate video memory offset for this row: Y * 320 + X
+    mov ax, cx                  ; AX = current Y
+    push dx
+    mov dx, 320
+    mul dx                      ; DX:AX = Y * 320
+    pop dx
+    add ax, bx                  ; AX = Y * 320 + X
+    mov di, ax                  ; DI = video offset
+    
+    ; Get font byte for this row
+    mov al, [ds:si]             ; AL = font byte (8 pixels)
+    add si, 2                   ; Skip next row (sample every other row)
+    mov ah, al                  ; Save font byte in AH
+    
+    ; Draw 4 pixels for this row (sample every other pixel)
+    mov ch, 4                   ; Pixel counter
+    
+.pixel_loop:
+    test ah, 0x80               ; Test leftmost bit
+    jz .skip_pixel              ; If 0, skip this pixel
+    
+    mov al, dl                  ; AL = color
+    mov [es:di], al             ; Write pixel
+    
+.skip_pixel:
+    inc di                      ; Next pixel position
+    shl ah, 2                   ; Shift by 2 bits (skip every other pixel)
+    dec ch
+    jnz .pixel_loop
+    
+    ; Move to next row
+    inc cx                      ; Y++
+    dec dh
+    jnz .row_loop
+    
+    ; Restore starting position
+    pop cx                      ; Restore Y
+    pop bx                      ; Restore X
+    
+    pop ds
+    pop es
+    popa
+    ret
+
+
+; --------------- PRINT STRING ---------------
+; ----- Print String in Graphics Mode (normal 8x8) -----
+print_string_gfx:
+    push bp
+    mov bp, sp
+    
+    push bx
+    push cx
+    push si
+    
+    mov dl, al
+    
+.char_loop:
+    mov al, [si]
+    cmp al, 0
+    je .done
+    
+    call draw_char_gfx
+    
+    add bx, 8
+    inc si
+    jmp .char_loop
+    
+.done:
+    pop si
+    pop cx
+    pop bx
+    pop bp
+    ret
+
+
+; ----- Print String in Graphics Mode (2x scale) -----
+print_string_gfx_2x:
+    push bp
+    mov bp, sp
+    
+    push bx
+    push cx
+    push si
+    
+    mov dl, al
+    
+.char_loop:
+    mov al, [si]
+    cmp al, 0
+    je .done
+    
+    call draw_char_gfx_2x
+    
+    add bx, 16
+    inc si
+    jmp .char_loop
+    
+.done:
+    pop si
+    pop cx
+    pop bx
+    pop bp
+    ret
+
+
+; ----- Print String in Graphics Mode (0.5x scale - 4x4 pixels per char) -----
+print_string_gfx_half:
+    push bp
+    mov bp, sp
+    
+    push bx                     ; Save starting X
+    push cx                     ; Save starting Y
+    push si                     ; Save string pointer
+    
+    mov dl, al                  ; DL = color (save it)
+    
+.char_loop:
+    mov al, [si]                ; Load character
+    cmp al, 0                   ; Check for null terminator
+    je .done
+    
+    ; Draw this character
+    call draw_char_gfx_half     ; Draw character (AL=char, BX=X, CX=Y, DL=color)
+    
+    add bx, 4                   ; Move to next character position (4 pixels wide for 0.5x)
+    inc si                      ; Next character in string
+    jmp .char_loop
+    
+.done:
+    pop si
+    pop cx
+    pop bx
+    pop bp
+    ret
+
+
+; ----- GET STRING INPUT FROM USER -----
+get_string_input:
+    push bp
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    
+    mov di, si
+    xor dx, dx
+    
+.input_loop:
+    mov ah, 0x00
+    int 0x16
+    
+    cmp al, 13
+    je .done_input
+    
+    cmp al, 8
+    je .handle_backspace
+    
+    cmp al, 32
+    jl .input_loop
+    cmp al, 126
+    jg .input_loop
+    
+    cmp dx, 20
+    jge .input_loop
+    
+    mov [di], al
+    inc di
+    inc dx
+    
+    push dx
+    mov dl, COLOR_BRIGHT_YELLOW
+    call draw_char_gfx
+    add bx, 8
+    pop dx
+    
+    jmp .input_loop
+    
+.handle_backspace:
+    cmp dx, 0
+    je .input_loop
+    
+    dec di
+    dec dx
+    mov byte [di], 0
+    
+    sub bx, 8
+    push ax
+    push si
+    push dx
+    mov si, 8
+    mov dx, 8
+    mov al, COLOR_DARK_GRAY
+    call fill_rect
+    pop dx
+    pop si
+    pop ax
+    
+    jmp .input_loop
+    
+.done_input:
+    mov byte [di], 0
+    
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    pop bp
+    ret
+
+
+; ----- FILL RECTANGLE -----
+fill_rect:
+    push bp                     ; Save base pointer
+    mov bp, sp                  ; Set up stack frame
+    
+    ; Save all parameters
+    push bx                     ; Save starting X
+    push cx                     ; Save starting Y
+    push dx                     ; Save width
+    push si                     ; Save height
+    push ax                     ; Save color
+    
+    ; Set ES to video memory segment
+    mov ax, 0xA000
+    mov es, ax
+    
+    pop ax                      ; Restore color
+    pop si                      ; Restore height
+    pop dx                      ; Restore width
+    
+.row_loop:
+    cmp si, 0                   ; Check if height is 0
+    je .done                    ; If so, we're done
+    
+    ; Calculate offset for current row: Y * 320 + X
+    push ax                     ; Save color
+    push dx                     ; Save width
+    
+    mov ax, cx                  ; AX = current Y
+    push dx                     ; Save DX (will be used by MUL)
+    mov dx, 320
+    mul dx                      ; DX:AX = Y * 320
+    pop dx                      ; Restore width
+    add ax, bx                  ; AX = Y * 320 + X
+    mov di, ax                  ; DI = offset
+    
+    pop dx                      ; Restore width
+    pop ax                      ; Restore color
+    
+    ; Fill current row
+    push cx                     ; Save Y coordinate
+    push dx                     ; Save width
+    mov cx, dx                  ; CX = width (number of pixels to draw)
+    
+    rep stosb                   ; Fill CX pixels with AL color
+    
+    pop dx                      ; Restore width
+    pop cx                      ; Restore Y coordinate
+    
+    ; Move to next row
+    inc cx                      ; Y++
+    dec si                      ; Height--
+    jmp .row_loop               ; Continue loop
+    
+.done:
+    pop cx                      ; Restore starting Y
+    pop bx                      ; Restore starting X
+    pop bp                      ; Restore base pointer
+    ret
+
+
+
+; ----- DRAW RECTANGLE (for car drawing) -----
+
+draw_rect:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+
+    mov si, ax          ; SI = height counter
+    mov di, dx          ; DI = current Y
+
+.row_loop:
+    cmp si, 0
+    jle .done
+    
+    push cx             ; Save width
+    push bx             ; Save start X
+    mov dx, di          ; Current Y
+    
+.col_loop:
+    cmp cx, 0
+    jle .next_row
+    
+    push cx
+    mov cx, bx          ; Current X
+    mov al, [color]
+    call put_pixel_2
+    pop cx
+    
+    inc bx
+    dec cx
+    jmp .col_loop
+
+.next_row:
+    pop bx              ; Restore start X
+    pop cx              ; Restore width
+    inc di              ; Next Y
+    dec si              ; Decrement height counter
+    jmp .row_loop
+
+.done:
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
